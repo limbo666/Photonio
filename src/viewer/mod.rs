@@ -3,7 +3,9 @@
 //          viewport coordinate math (zoom/pan helpers).
 
 use eframe::egui;
-use image::DynamicImage;
+use image::codecs::gif::GifDecoder;
+use image::codecs::webp::WebPDecoder;
+use image::{AnimationDecoder, DynamicImage};
 
 /// A decoded image plus its allocated GPU texture.
 pub struct ViewerImage {
@@ -57,6 +59,11 @@ impl ViewerImage {
     pub fn rgba_bytes(&self) -> Vec<u8> {
         self.rgba.clone()
     }
+
+    /// Dimensions of the display-res RGBA buffer (the actual stored pixels).
+    pub fn display_dimensions(&self) -> [usize; 2] {
+        self.display
+    }
 }
 
 /// Decode raw bytes into an EXIF-oriented image.
@@ -66,8 +73,62 @@ pub fn decode(bytes: &[u8]) -> Result<DynamicImage, String> {
     Ok(apply_orientation(img, orientation))
 }
 
+/// A decoded animation (GIF or WebP): composited frames plus per-frame delays.
+pub struct DecodedAnimation {
+    pub frames: Vec<DynamicImage>,
+    pub delays: Vec<std::time::Duration>,
+}
+
+/// Decode every frame of an animated GIF (each frame composited onto the full
+/// canvas) together with its delay. Pure Rust via the `image` crate's
+/// `GifDecoder` — no external C library or video codec.
+pub fn decode_gif(bytes: &[u8]) -> Result<DecodedAnimation, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = GifDecoder::new(cursor).map_err(|e| e.to_string())?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(frames.len());
+    let mut delays = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let buffer = frame.into_buffer();
+        delays.push(std::time::Duration::from(delay));
+        out.push(DynamicImage::ImageRgba8(buffer));
+    }
+    Ok(DecodedAnimation { frames: out, delays })
+}
+
+/// Decode every frame of an animated WebP. Returns an error for still WebP
+/// images so callers fall back to the static decode path.
+pub fn decode_webp(bytes: &[u8]) -> Result<DecodedAnimation, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = WebPDecoder::new(cursor).map_err(|e| e.to_string())?;
+    if !decoder.has_animation() {
+        return Err("not an animated WebP".to_string());
+    }
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(frames.len());
+    let mut delays = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let buffer = frame.into_buffer();
+        delays.push(std::time::Duration::from(delay));
+        out.push(DynamicImage::ImageRgba8(buffer));
+    }
+    Ok(DecodedAnimation { frames: out, delays })
+}
+
 /// Decode a thumbnail, preferring the embedded EXIF thumbnail (fast) and
 /// falling back to a full decode + downscale only when none exists.
+///
+/// For animated images (GIF/WebP), `image::load_from_memory` below decodes
+/// only the very first frame, so filmstrip thumbnails never pay for the whole
+/// animation loop.
 pub(crate) fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Result<DynamicImage, String> {
     if let Some(thumb) = embedded_thumbnail(bytes, max_side) {
         return Ok(thumb);
@@ -233,5 +294,36 @@ mod tests {
         let small = DynamicImage::ImageRgba8(RgbaImage::from_pixel(100, 50, Rgba([0, 0, 0, 255])));
         let fitted = fit_within(&small, 2048);
         assert_eq!((fitted.width(), fitted.height()), (100, 50));
+    }
+
+    #[test]
+    fn decodes_animated_gif_frames_and_delays() {
+        use image::{Delay, Frame};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .encode_frame(Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255])),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(100, 1),
+                ))
+                .unwrap();
+            encoder
+                .encode_frame(Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([0, 255, 0, 255])),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(200, 1),
+                ))
+                .unwrap();
+        }
+        let gif = decode_gif(&bytes).expect("decode animated gif");
+        assert_eq!(gif.frames.len(), 2);
+        assert_eq!(gif.delays.len(), 2);
+        assert_eq!(gif.delays[0], std::time::Duration::from_millis(100));
+        assert_eq!(gif.delays[1], std::time::Duration::from_millis(200));
+        assert_eq!((gif.frames[0].width(), gif.frames[0].height()), (2, 2));
     }
 }

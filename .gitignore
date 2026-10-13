@@ -8,3 +8,7 @@ desktop.ini
 *.swp
 .idea/
 .vscode/
+
+# Crash dumps / debug logs
+*.dmp
+*.log

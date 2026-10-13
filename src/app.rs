@@ -8,12 +8,55 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use crate::{about, assets, config, filesystem, loader, platform, viewer};
+use crate::{about, assets, config, filesystem, icons, loader, platform, theme, viewer};
 
 /// Color used for inline failure notices.
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 87, 87);
 /// Color used for success feedback in the HUD.
 const SUCCESS_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 220, 150);
+/// Badge color for the active-GIF indicator in the HUD.
+const GIF_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 50);
+/// Amber warning color for registry path-mismatch notices.
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 170, 40);
+
+/// Register Font Awesome Solid as a fallback font so icon glyphs render
+/// natively and consistently across the UI.
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "font_awesome".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/fa-solid-900.otf")),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("font_awesome".to_owned());
+    ctx.set_fonts(fonts);
+}
+
+/// Set the global egui widget visuals to match the backdrop theme, so
+/// checkboxes, radio buttons, separators, and buttons follow Light/Dark mode.
+fn apply_global_visuals(ctx: &egui::Context, dark_mode: bool) {
+    if dark_mode {
+        ctx.set_visuals(egui::Visuals::dark());
+        return;
+    }
+    let mut visuals = egui::Visuals::light();
+    visuals.widgets.noninteractive.bg_stroke =
+        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(30));
+    visuals.widgets.inactive.bg_fill =
+        egui::Color32::from_rgba_premultiplied(230, 233, 238, 200);
+    visuals.widgets.inactive.bg_stroke =
+        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40));
+    visuals.widgets.hovered.bg_fill =
+        egui::Color32::from_rgba_premultiplied(214, 218, 226, 200);
+    visuals.widgets.active.bg_fill =
+        egui::Color32::from_rgba_premultiplied(198, 204, 214, 220);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(255, 200, 50);
+    visuals.selection.stroke = egui::Stroke::new(2.0_f32, egui::Color32::from_gray(30));
+    ctx.set_visuals(visuals);
+}
 
 /// Raw input collected once per frame, then acted on.
 struct InputSnapshot {
@@ -41,14 +84,20 @@ struct InputSnapshot {
     close_folder: bool,
     open_settings: bool,
     toggle_filmstrip: bool,
+    toggle_play: bool,
+    step_back: bool,
+    step_forward: bool,
+    save_as: bool,
+    print: bool,
 }
 
-/// Button actions reported back from the HUD.
-#[derive(Default)]
-struct HudActions {
-    open_file: bool,
-    open_folder: bool,
-    toggle_filmstrip: bool,
+/// An action selected from the quick-action pill.
+enum PillAction {
+    OpenFile,
+    OpenFolder,
+    SaveAs,
+    Print,
+    ToggleFilmstrip,
 }
 
 /// An action selected from the context menu.
@@ -78,6 +127,59 @@ struct Thumb {
     dims: [usize; 2],
 }
 
+/// Playback state for a multi-frame animation (GIF or WebP). Each frame is a
+/// display-res GPU texture; `dimensions` is the shared canvas size for zoom math.
+struct AnimationPlayer {
+    frames: Vec<egui::TextureHandle>,
+    dimensions: [usize; 2],
+    delays_ms: Vec<u64>,
+    current_frame: usize,
+    paused: bool,
+    next_frame: std::time::Instant,
+    kind: loader::AnimKind,
+}
+
+impl AnimationPlayer {
+    fn new(
+        frames: Vec<(Vec<u8>, [usize; 2], [usize; 2])>,
+        delays_ms: Vec<u64>,
+        kind: loader::AnimKind,
+        ctx: &egui::Context,
+    ) -> Self {
+        let dimensions = frames.first().map(|f| f.2).unwrap_or([0, 0]);
+        let mut textures = Vec::with_capacity(frames.len());
+        for (i, (rgba, display, _)) in frames.into_iter().enumerate() {
+            let color = egui::ColorImage::from_rgba_unmultiplied(display, &rgba);
+            let texture = ctx.load_texture(
+                format!("gif-frame-{i}"),
+                color,
+                egui::TextureOptions::LINEAR,
+            );
+            textures.push(texture);
+        }
+        let first_delay = delays_ms.first().copied().unwrap_or(100);
+        Self {
+            frames: textures,
+            dimensions,
+            delays_ms,
+            current_frame: 0,
+            paused: false,
+            next_frame: std::time::Instant::now() + std::time::Duration::from_millis(first_delay),
+            kind,
+        }
+    }
+
+    /// The texture id + canvas dimensions of the currently-shown frame.
+    fn current_texture(&self) -> (egui::TextureId, [usize; 2]) {
+        let id = self
+            .frames
+            .get(self.current_frame)
+            .map(|t| t.id())
+            .unwrap_or(egui::TextureId::Managed(0));
+        (id, self.dimensions)
+    }
+}
+
 pub struct PhotonioApp {
     /// Currently displayed image (decoded + GPU texture), if any.
     image: Option<viewer::ViewerImage>,
@@ -85,6 +187,8 @@ pub struct PhotonioApp {
     /// for the current index is still in flight — keeps the main window in
     /// sync with the filmstrip during fast navigation.
     preview: Option<(egui::TextureHandle, [usize; 2])>,
+    /// Active animated GIF playback state, if the current image is one.
+    animation: Option<AnimationPlayer>,
     /// Human-readable reason the last load failed, if it did.
     error: Option<String>,
     /// Naturally-sorted image files in the current directory.
@@ -109,6 +213,10 @@ pub struct PhotonioApp {
     help_opened_this_frame: bool,
     /// Transient feedback badge: (message, when shown).
     feedback: Option<(String, std::time::Instant)>,
+    /// Windows registration health, refreshed when Settings opens.
+    reg_status: platform::RegistryStatus,
+    /// Whether the Explorer folder context menu is registered.
+    folder_menu_registered: bool,
     /// The branded watermark logo texture + dimensions, if decoded.
     logo: Option<(egui::TextureHandle, [usize; 2])>,
     /// Background image decoder + preload channel manager.
@@ -119,6 +227,9 @@ pub struct PhotonioApp {
     pending_full: HashSet<usize>,
     /// Indices with a thumbnail decode currently in flight (dedup + retry).
     pending_thumb: HashSet<usize>,
+    /// Indices whose thumbnail decode definitively failed (shown as a
+    /// placeholder; never retried until the folder changes).
+    failed_thumb: HashSet<usize>,
     /// File index currently awaiting a full decode (to show a spinner).
     loading_index: Option<usize>,
     /// Cached thumbnails by file index.
@@ -126,8 +237,16 @@ pub struct PhotonioApp {
 }
 
 impl PhotonioApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: config::Config) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: config::Config,
+        cli_path: Option<PathBuf>,
+    ) -> Self {
+        apply_global_visuals(
+            &cc.egui_ctx,
+            config.canvas_background != config::CanvasBackground::Light,
+        );
+        setup_fonts(&cc.egui_ctx);
 
         // Load the embedded logo once for the empty-state watermark + About.
         let logo = assets::logo_color_image().map(|(color, dims)| {
@@ -140,6 +259,7 @@ impl PhotonioApp {
         let mut app = Self {
             image: None,
             preview: None,
+            animation: None,
             error: None,
             files: Vec::new(),
             current_index: 0,
@@ -153,18 +273,34 @@ impl PhotonioApp {
             show_settings: false,
             help_opened_this_frame: false,
             feedback: None,
+            reg_status: platform::RegistryStatus::NotRegistered,
+            folder_menu_registered: false,
             logo,
-            loader: loader::Loader::new(),
+            loader: loader::Loader::new(cc.egui_ctx.clone()),
             full_cache: HashMap::new(),
             pending_full: HashSet::new(),
             pending_thumb: HashSet::new(),
+            failed_thumb: HashSet::new(),
             loading_index: None,
             thumb_cache: HashMap::new(),
         };
 
-        // Resume the last directory on startup, if configured.
-        if app.config.remember_last_folder {
-            if let Some(dir) = app.config.last_directory.clone() {
+        if let Some(path) = cli_path {
+            // Explicit path (CLI / double-click / Open With / folder context
+            // menu): skip config restoration and open the target directly.
+            if path.is_dir() {
+                app.open_directory(path, &cc.egui_ctx);
+            } else if path.is_file() {
+                app.open_file(path, &cc.egui_ctx);
+            }
+            // A missing/invalid path falls through to the branded empty state.
+        } else if app.config.remember_last_folder {
+            // Resume the exact last-viewed image on startup, if configured and it
+            // still exists; otherwise fall back to the last folder (index 0), then
+            // to the branded empty state.
+            if let Some(file) = app.config.last_file_path.clone().filter(|p| p.is_file()) {
+                app.open_file(file, &cc.egui_ctx);
+            } else if let Some(dir) = app.config.last_directory.clone().filter(|p| p.is_dir()) {
                 app.open_directory(dir, &cc.egui_ctx);
             }
         }
@@ -185,6 +321,15 @@ impl PhotonioApp {
         self.current_index = index;
         self.loader.set_current_index(index);
 
+        // Record the exact last-viewed image + its parent directory so the app
+        // can resume at this image on next launch (persisted on exit/open).
+        if let Some(path) = self.files.get(index) {
+            self.config.last_file_path = Some(path.clone());
+            if let Some(parent) = path.parent() {
+                self.config.last_directory = Some(parent.to_path_buf());
+            }
+        }
+
         if let Some((rgba, display, full)) = self.full_cache.get(&index).cloned() {
             self.preview = None;
             self.set_image_from_rgba(rgba, display, full, ctx);
@@ -200,7 +345,7 @@ impl PhotonioApp {
             if !self.pending_full.contains(&index) {
                 if let Some(path) = self.files.get(index).cloned() {
                     self.pending_full.insert(index);
-                    self.loader.request_full(index, path);
+                    self.loader.request_full(index, path, self.files.len());
                 }
             }
         }
@@ -218,6 +363,7 @@ impl PhotonioApp {
         ctx: &egui::Context,
     ) {
         self.image = Some(viewer::ViewerImage::from_rgba(ctx, rgba, display, full));
+        self.animation = None;
         self.error = None;
         self.reset_viewport();
     }
@@ -231,19 +377,43 @@ impl PhotonioApp {
         }
     }
 
+    /// Install a decoded animation as the active image (replacing any static
+    /// image) and reset the viewport for the animation's canvas size.
+    fn set_animation(
+        &mut self,
+        frames: Vec<(Vec<u8>, [usize; 2], [usize; 2])>,
+        delays_ms: Vec<u64>,
+        kind: loader::AnimKind,
+        ctx: &egui::Context,
+    ) {
+        self.animation = Some(AnimationPlayer::new(frames, delays_ms, kind, ctx));
+        self.image = None;
+        self.error = None;
+        self.reset_viewport();
+    }
+
     /// Speculatively preload full images adjacent to `index`, plus thumbnails.
     fn request_preload(&mut self, index: usize) {
-        let len = self.files.len() as i64;
-        let cur = index as i64;
-        for delta in [-1i64, 1] {
-            let i = cur + delta;
-            if i >= 0 && i < len {
-                let i = i as usize;
-                if !self.full_cache.contains_key(&i) && !self.pending_full.contains(&i) {
-                    if let Some(path) = self.files.get(i).cloned() {
-                        self.pending_full.insert(i);
-                        self.loader.request_full(i, path);
-                    }
+        let len = self.files.len();
+        if len == 0 {
+            return;
+        }
+        for delta in [-1isize, 1] {
+            let i = if self.config.loop_navigation {
+                // Wrap around the ring so folder-edge neighbors are preloaded.
+                (index as isize + delta).rem_euclid(len as isize) as usize
+            } else {
+                let i = index as isize + delta;
+                if i >= 0 && i < len as isize {
+                    i as usize
+                } else {
+                    continue;
+                }
+            };
+            if !self.full_cache.contains_key(&i) && !self.pending_full.contains(&i) {
+                if let Some(path) = self.files.get(i).cloned() {
+                    self.pending_full.insert(i);
+                    self.loader.request_full(i, path, len);
                 }
             }
         }
@@ -266,7 +436,10 @@ impl PhotonioApp {
             (0..len).collect()
         };
         for i in window {
-            if self.thumb_cache.contains_key(&i) || self.pending_thumb.contains(&i) {
+            if self.thumb_cache.contains_key(&i)
+                || self.pending_thumb.contains(&i)
+                || self.failed_thumb.contains(&i)
+            {
                 continue;
             }
             if let Some(path) = self.files.get(i).cloned() {
@@ -293,7 +466,7 @@ impl PhotonioApp {
         }
         if let Some(path) = self.files.get(index).cloned() {
             self.pending_full.insert(index);
-            self.loader.request_full(index, path);
+            self.loader.request_full(index, path, self.files.len());
         }
     }
 
@@ -319,11 +492,20 @@ impl PhotonioApp {
                         self.loading_index = None;
                     }
                 }
+                loader::ResponseKind::FullAnimated { index, frames, delays_ms, kind } => {
+                    self.pending_full.remove(&index);
+                    if self.loading_index == Some(index) && index == self.current_index {
+                        self.preview = None;
+                        self.set_animation(frames, delays_ms, kind, ctx);
+                        self.loading_index = None;
+                    }
+                }
                 loader::ResponseKind::FullFailed { index, error } => {
                     self.pending_full.remove(&index);
                     if self.loading_index == Some(index) && index == self.current_index {
                         self.preview = None;
                         self.image = None;
+                        self.animation = None;
                         self.error = Some(error);
                         self.loading_index = None;
                     }
@@ -348,7 +530,10 @@ impl PhotonioApp {
                         self.set_preview(index);
                     }
                 }
-                loader::ResponseKind::ThumbFailed => {}
+                loader::ResponseKind::ThumbFailed { index } => {
+                    self.pending_thumb.remove(&index);
+                    self.failed_thumb.insert(index);
+                }
             }
         }
     }
@@ -361,15 +546,18 @@ impl PhotonioApp {
         self.pending_full.clear();
         self.thumb_cache.clear();
         self.pending_thumb.clear();
+        self.failed_thumb.clear();
         self.loading_index = None;
         self.preview = None;
+        self.animation = None;
     }
 
     /// Evict cache entries far from the current index to bound memory.
     fn evict_caches(&mut self) {
-        let cur = self.current_index as i64;
-        self.full_cache.retain(|&i, _| (i as i64 - cur).abs() <= 3);
-        self.thumb_cache.retain(|&i, _| (i as i64 - cur).abs() <= 5);
+        let cur = self.current_index;
+        let len = self.files.len();
+        self.full_cache.retain(|&i, _| loader::ring_dist(i, cur, len) <= 3);
+        self.thumb_cache.retain(|&i, _| loader::ring_dist(i, cur, len) <= 5);
     }
 
     fn step(&mut self, delta: isize, ctx: &egui::Context) {
@@ -397,6 +585,7 @@ impl PhotonioApp {
         if !filesystem::is_supported_path(&path) {
             self.image = None;
             self.preview = None;
+            self.animation = None;
             self.error = Some(format!("Unsupported file: {}", path.display()));
             return;
         }
@@ -425,8 +614,9 @@ impl PhotonioApp {
         self.files = filesystem::scan_directory(&dir);
         if self.files.is_empty() {
             self.image = None;
-            self.error = Some(format!("No supported images found in {}", dir.display()));
+            self.error = Some("No supported images found in folder".to_string());
             self.current_index = 0;
+            self.config.last_file_path = None;
             self.reset_viewport();
         } else {
             self.current_index = 0;
@@ -445,7 +635,11 @@ impl PhotonioApp {
         });
 
         if let Some(path) = dropped.into_iter().next() {
-            self.open_file(path, ctx);
+            if path.is_dir() {
+                self.open_directory(path, ctx);
+            } else {
+                self.open_file(path, ctx);
+            }
         }
     }
 
@@ -460,7 +654,7 @@ impl PhotonioApp {
         self.context_menu_pos = None;
         self.files.remove(self.current_index);
         self.advance_after_removal(ctx);
-        self.show_status("File closed");
+        self.show_success("File closed");
     }
 
     fn close_folder(&mut self) {
@@ -471,7 +665,11 @@ impl PhotonioApp {
         self.current_index = 0;
         self.reset_viewport();
         self.clear_caches();
-        self.show_status("Folder closed");
+        // Forget the saved paths so a restart boots into the clean empty state.
+        self.config.last_file_path = None;
+        self.config.last_directory = None;
+        self.save_config();
+        self.show_success("Folder closed");
     }
 
     fn advance_after_removal(&mut self, ctx: &egui::Context) {
@@ -517,7 +715,7 @@ impl PhotonioApp {
     fn copy_current_path(&mut self, ctx: &egui::Context) {
         if let Some(path) = self.current_file() {
             ctx.copy_text(path.display().to_string());
-            self.show_status("Path copied");
+            self.show_success("Copied path");
         }
     }
 
@@ -526,7 +724,7 @@ impl PhotonioApp {
             return;
         };
         match platform::copy_file_to_clipboard(&path) {
-            Ok(()) => self.show_status("File copied"),
+            Ok(()) => self.show_success("File copied"),
             Err(e) => self.show_status(format!("Copy file failed: {e}")),
         }
     }
@@ -545,11 +743,111 @@ impl PhotonioApp {
                     bytes: std::borrow::Cow::Owned(bytes),
                 };
                 match clipboard.set_image(data) {
-                    Ok(()) => self.show_status("Image copied"),
+                    Ok(()) => self.show_success("Image copied"),
                     Err(e) => self.show_status(format!("Copy image failed: {e}")),
                 }
             }
             Err(e) => self.show_status(format!("Clipboard unavailable: {e}")),
+        }
+    }
+
+    /// Open a native "Save As" dialog and write the currently displayed image
+    /// (with any in-memory manual rotations already applied) to the chosen path.
+    fn save_current_as(&mut self) {
+        let Some(image) = &self.image else {
+            self.show_status("No image to save");
+            return;
+        };
+        let rgba = image.rgba_bytes();
+        let [w, h] = image.display_dimensions();
+
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save Image As")
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("BMP", &["bmp"])
+            .add_filter("WebP", &["webp"]);
+        if let Some(dir) = &self.config.last_directory {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        // rfd may return a path without an extension; default to PNG.
+        let path = if path.extension().is_some() {
+            path
+        } else {
+            path.with_extension("png")
+        };
+
+        let result = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+            .ok_or_else(|| "invalid image buffer".to_string())
+            .and_then(|buf| {
+                image::DynamicImage::ImageRgba8(buf)
+                    .save(&path)
+                    .map_err(|e| e.to_string())
+            });
+
+        match result {
+            Ok(()) => self.show_success("Saved image"),
+            Err(e) => self.show_status(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Launch the native Windows Print Wizard for the active image.
+    fn print_current(&mut self) {
+        let Some(path) = self.current_file().cloned() else {
+            self.show_status("No image to print");
+            return;
+        };
+        match platform::print_image(&path) {
+            Ok(()) => self.show_success("Sent to Print Wizard"),
+            Err(e) => self.show_status(format!("Print failed: {e}")),
+        }
+    }
+
+    /// Re-run the HKCU registration, refresh the health status, and toast.
+    fn refresh_registration(&mut self) {
+        match platform::update_registration() {
+            Ok(()) => {
+                self.reg_status = platform::check_registration_status();
+                self.show_success("Windows registration updated to current path");
+            }
+            Err(e) => self.show_status(format!("Registration failed: {e}")),
+        }
+    }
+
+    /// Toggle the Explorer folder context-menu registration and toast.
+    fn toggle_folder_context_menu(&mut self) {
+        let result = if self.folder_menu_registered {
+            platform::remove_folder_context_menu()
+        } else {
+            platform::add_folder_context_menu()
+        };
+        match result {
+            Ok(()) => {
+                self.folder_menu_registered = platform::is_folder_context_menu_registered();
+                if self.folder_menu_registered {
+                    self.show_success("Added 'Open folder with Photonio' to Explorer");
+                } else {
+                    self.show_success("Removed folder context menu");
+                }
+            }
+            Err(e) => self.show_status(format!("Context menu update failed: {e}")),
+        }
+    }
+
+    /// Execute an action reported by the quick-action pill.
+    fn execute_pill_action(&mut self, action: PillAction, ctx: &egui::Context) {
+        match action {
+            PillAction::OpenFile => self.open_file_dialog(ctx),
+            PillAction::OpenFolder => self.open_folder_dialog(ctx),
+            PillAction::SaveAs => self.save_current_as(),
+            PillAction::Print => self.print_current(),
+            PillAction::ToggleFilmstrip => {
+                self.config.show_filmstrip = !self.config.show_filmstrip;
+                self.save_config();
+            }
         }
     }
 
@@ -558,7 +856,7 @@ impl PhotonioApp {
             return;
         };
         match platform::set_wallpaper(&path) {
-            Ok(()) => self.show_status("Wallpaper set"),
+            Ok(()) => self.show_success("Wallpaper set"),
             Err(e) => self.show_status(format!("Wallpaper failed: {e}")),
         }
     }
@@ -583,7 +881,7 @@ impl PhotonioApp {
 
         match trash::delete(&path) {
             Ok(()) => {
-                self.show_status("Deleted");
+                self.show_status(format!("{} Moved to Recycle Bin", icons::ICON_TRASH));
                 self.files.remove(self.current_index);
                 self.advance_after_removal(ctx);
             }
@@ -642,6 +940,11 @@ impl PhotonioApp {
             close_folder: i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W),
             open_settings: i.modifiers.ctrl && i.key_pressed(egui::Key::Comma),
             toggle_filmstrip: i.key_pressed(egui::Key::T),
+            toggle_play: i.key_pressed(egui::Key::Space),
+            step_back: i.key_pressed(egui::Key::OpenBracket),
+            step_forward: i.key_pressed(egui::Key::CloseBracket),
+            save_as: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+            print: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::P),
         })
     }
 
@@ -659,6 +962,40 @@ impl PhotonioApp {
         if input.double_clicked {
             self.zoom = if self.zoom.is_none() { Some(1.0) } else { None };
             self.pan = egui::Vec2::ZERO;
+        }
+    }
+
+    /// Handle animation playback input: Space toggles play/pause; `[` / `]`
+    /// step a frame (useful while paused).
+    fn handle_animation_input(&mut self, input: &InputSnapshot) {
+        let Some(anim) = &mut self.animation else {
+            return;
+        };
+        if input.toggle_play {
+            anim.paused = !anim.paused;
+            if !anim.paused {
+                // Resume: give the current frame its full delay before advancing.
+                let delay = anim.delays_ms.get(anim.current_frame).copied().unwrap_or(100);
+                anim.next_frame =
+                    std::time::Instant::now() + std::time::Duration::from_millis(delay);
+            }
+        }
+        let step = if input.step_back {
+            -1isize
+        } else if input.step_forward {
+            1isize
+        } else {
+            0isize
+        };
+        if step != 0 {
+            let len = anim.frames.len();
+            if len > 0 {
+                anim.current_frame =
+                    (anim.current_frame as isize + step).rem_euclid(len as isize) as usize;
+                let delay = anim.delays_ms.get(anim.current_frame).copied().unwrap_or(100);
+                anim.next_frame =
+                    std::time::Instant::now() + std::time::Duration::from_millis(delay);
+            }
         }
     }
 
@@ -691,6 +1028,15 @@ impl PhotonioApp {
         self.show_help = false;
         self.show_about = false;
         self.context_menu_pos = None;
+        // Refresh the registry health check for the integration footer.
+        self.reg_status = platform::check_registration_status();
+        self.folder_menu_registered = platform::is_folder_context_menu_registered();
+    }
+
+    /// True when a modal or the context menu is open — these must swallow
+    /// mouse-wheel input so it never leaks to the background canvas.
+    fn modal_open(&self) -> bool {
+        self.show_settings || self.show_help || self.show_about || self.context_menu_pos.is_some()
     }
 
     // ------------------------------------------------------------------
@@ -709,13 +1055,18 @@ impl PhotonioApp {
         self.feedback = Some((message.into(), std::time::Instant::now()));
     }
 
+    /// Show a success toast, prefixed with the check icon.
+    fn show_success(&mut self, message: impl Into<String>) {
+        self.show_status(format!("{} {}", icons::ICON_CHECK, message.into()));
+    }
+
     fn take_status_text(&mut self) -> Option<String> {
         let (message, at) = self.feedback.as_ref()?;
         if at.elapsed() > std::time::Duration::from_secs(2) {
             self.feedback = None;
             return None;
         }
-        Some(format!("✓ {message}"))
+        Some(message.clone())
     }
 
     // ------------------------------------------------------------------
@@ -734,6 +1085,8 @@ impl PhotonioApp {
 
         let (texture_id, dimensions) = if let Some((tex, dims)) = &self.preview {
             (tex.id(), *dims)
+        } else if let Some(anim) = &self.animation {
+            anim.current_texture()
         } else if let Some(image) = &self.image {
             (image.texture.id(), image.dimensions)
         } else {
@@ -746,7 +1099,7 @@ impl PhotonioApp {
 
         // Wheel zoom when Ctrl is held, or always in "Zoom" wheel mode.
         let wheel_zooms = self.config.mouse_wheel_action == config::MouseWheelAction::Zoom;
-        if (input.ctrl || wheel_zooms) && input.scroll != 0.0 {
+        if (input.ctrl || wheel_zooms) && input.scroll != 0.0 && !self.modal_open() {
             let old = self.effective_zoom(dimensions, available);
             let factor = (input.scroll * 0.003).exp();
             let new = (old * factor).clamp(0.02, 64.0);
@@ -811,11 +1164,29 @@ impl PhotonioApp {
     /// Branded empty state: a soft-opacity logo watermark + helper text,
     /// anchored at the exact viewport center.
     fn draw_empty_state(&self, ctx: &egui::Context) {
+        let dark = self.is_dark_theme();
+        let title_color = if dark {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_gray(25)
+        };
+        let version_color = if dark {
+            egui::Color32::from_gray(140)
+        } else {
+            egui::Color32::from_gray(100)
+        };
+        let hint_color = if dark {
+            egui::Color32::from_rgb(205, 205, 214)
+        } else {
+            egui::Color32::from_rgb(60, 60, 66)
+        };
+
         egui::Area::new(egui::Id::new("empty-state"))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
+                    // 1. Logo (native aspect ratio, subtle watermark).
                     if let Some((texture, dims)) = &self.logo {
                         let max = 180.0;
                         let scale = (max / dims[0] as f32).min(max / dims[1] as f32).min(1.0);
@@ -823,42 +1194,48 @@ impl PhotonioApp {
                         let tint = egui::Color32::from_white_alpha(90);
                         ui.add(egui::Image::new(texture).fit_to_exact_size(size).tint(tint));
                     }
+                    ui.add_space(12.0);
+                    // 2. App title.
+                    ui.label(
+                        egui::RichText::new("Photonio")
+                            .size(24.0)
+                            .strong()
+                            .color(title_color),
+                    );
+                    // 3. Version tag.
+                    ui.label(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .size(13.0)
+                            .color(version_color),
+                    );
                     ui.add_space(16.0);
-                    let text_color = match self.config.canvas_background {
-                        config::CanvasBackground::Light => egui::Color32::from_rgb(60, 60, 66),
-                        _ => egui::Color32::from_rgb(205, 205, 214),
-                    };
+                    // 4. Guidance hint.
                     ui.label(
                         egui::RichText::new("Drop an image or press Ctrl+O to open")
-                            .color(text_color),
+                            .size(14.0)
+                            .color(hint_color),
                     );
                 });
             });
     }
 
-    fn glass_frame(opacity: u8) -> egui::Frame {
-        egui::Frame::none()
-            .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 25, opacity))
-            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(40)))
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(14.0, 8.0))
-            .shadow(egui::Shadow {
-                offset: egui::vec2(0.0, 4.0),
-                blur: 18.0,
-                spread: 0.0,
-                color: egui::Color32::from_black_alpha(150),
-            })
+    /// True when the app is in a dark backdrop mode (Glass or Dark).
+    fn is_dark_theme(&self) -> bool {
+        self.config.canvas_background != config::CanvasBackground::Light
     }
 
-    fn draw_hud(&mut self, ctx: &egui::Context) -> HudActions {
-        let mut actions = HudActions::default();
+    /// Theme-derived glass colors for the current backdrop + opacity.
+    fn theme(&self) -> theme::ThemeColors {
+        theme::ThemeColors::new(self.is_dark_theme(), self.config.glass_opacity)
+    }
 
+    fn draw_hud(&mut self, ctx: &egui::Context) {
         if self.files.is_empty() {
-            return actions;
+            return;
         }
         // Hidden mode: no HUD bar (navigation via hotkeys/wheel only).
         if self.config.hud_position == config::HudPosition::Hidden {
-            return actions;
+            return;
         }
 
         let total = self.files.len();
@@ -870,7 +1247,10 @@ impl PhotonioApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let status = self.take_status_text();
-        let opacity = self.config.glass_opacity;
+        let gif_cur = self.animation.as_ref().map(|a| a.current_frame + 1);
+        let gif_total = self.animation.as_ref().map(|a| a.frames.len());
+        let gif_badge = self.animation.as_ref().map(|a| a.kind.badge());
+        let colors = self.theme();
         let (anchor, offset) = match self.config.hud_position {
             config::HudPosition::Top => (egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0)),
             _ => (egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -12.0)),
@@ -883,10 +1263,14 @@ impl PhotonioApp {
             .anchor(anchor, offset)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                Self::glass_frame(opacity).show(ui, |ui| {
+                colors.panel(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new("<").frame(false).min_size(egui::vec2(24.0, 20.0)))
+                            .add(
+                                egui::Button::new(egui::RichText::new(icons::ICON_PREV).size(14.0))
+                                    .frame(false)
+                                    .min_size(egui::vec2(24.0, 20.0)),
+                            )
                             .clicked()
                         {
                             clicked_prev = true;
@@ -903,23 +1287,23 @@ impl PhotonioApp {
                             ui.label(name);
                         }
 
+                        if let (Some(cur), Some(total)) = (gif_cur, gif_total) {
+                            let badge = gif_badge.unwrap_or("[GIF]");
+                            ui.label(egui::RichText::new(badge).color(GIF_COLOR).monospace());
+                            ui.label(
+                                egui::RichText::new(format!("Frame {cur} / {total}")).monospace(),
+                            );
+                        }
+
                         if ui
-                            .add(egui::Button::new(">").frame(false).min_size(egui::vec2(24.0, 20.0)))
+                            .add(
+                                egui::Button::new(egui::RichText::new(icons::ICON_NEXT).size(14.0))
+                                    .frame(false)
+                                    .min_size(egui::vec2(24.0, 20.0)),
+                            )
                             .clicked()
                         {
                             clicked_next = true;
-                        }
-
-                        ui.separator();
-
-                        if ui.add(egui::Button::new("Open File").frame(false)).clicked() {
-                            actions.open_file = true;
-                        }
-                        if ui.add(egui::Button::new("Open Folder").frame(false)).clicked() {
-                            actions.open_folder = true;
-                        }
-                        if ui.add(egui::Button::new("Filmstrip").frame(false)).clicked() {
-                            actions.toggle_filmstrip = true;
                         }
                     });
                 });
@@ -930,15 +1314,144 @@ impl PhotonioApp {
         } else if clicked_next {
             self.step(1, ctx);
         }
+    }
 
-        actions
+    /// Floating glass quick-action pill docked at the top-right of the canvas.
+    fn draw_quick_pill(&mut self, ctx: &egui::Context) -> Option<PillAction> {
+        if !self.config.quick_pill_enabled {
+            return None;
+        }
+        let colors = self.theme();
+        let vertical = self.config.quick_pill_orientation == config::Orientation::Vertical;
+        let mut action = None;
+
+        egui::Area::new(egui::Id::new("quick-action-pill"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                colors.panel(ui, |ui| {
+                    if vertical {
+                        ui.vertical(|ui| {
+                            if let Some(a) = self.pill_buttons(ui) {
+                                action = Some(a);
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            if let Some(a) = self.pill_buttons(ui) {
+                                action = Some(a);
+                            }
+                        });
+                    }
+                });
+            });
+
+        action
+    }
+
+    /// Render the pill's buttons; returns the clicked action, if any.
+    fn pill_buttons(&self, ui: &mut egui::Ui) -> Option<PillAction> {
+        if self.config.pill_open_file {
+            if pill_button(ui, icons::ICON_OPEN_FILE, "Open File (Ctrl+O)").clicked() {
+                return Some(PillAction::OpenFile);
+            }
+        }
+        if self.config.pill_open_folder {
+            if pill_button(ui, icons::ICON_OPEN_FOLDER, "Open Folder (Ctrl+Shift+O)").clicked() {
+                return Some(PillAction::OpenFolder);
+            }
+        }
+        if self.config.pill_save_as {
+            if pill_button(ui, icons::ICON_SAVE, "Save As (Ctrl+S)").clicked() {
+                return Some(PillAction::SaveAs);
+            }
+        }
+        if self.config.pill_print {
+            if pill_button(ui, icons::ICON_PRINT, "Print (Ctrl+P)").clicked() {
+                return Some(PillAction::Print);
+            }
+        }
+        if self.config.pill_share {
+            // Placeholder — disabled until sharing is implemented.
+            ui.add_enabled(
+                false,
+                egui::Button::new(egui::RichText::new(icons::ICON_SHARE).size(16.0))
+                    .frame(false)
+                    .min_size(egui::vec2(28.0, 24.0)),
+            )
+            .on_hover_text("Share (coming soon)");
+        }
+        if self.config.pill_filmstrip {
+            if pill_button(ui, icons::ICON_FILMSTRIP, "Toggle Filmstrip (T)").clicked() {
+                return Some(PillAction::ToggleFilmstrip);
+            }
+        }
+        None
+    }
+
+    /// Draw one filmstrip tile at the current cursor position; returns the
+    /// index if the tile was clicked.
+    fn filmstrip_tile(&self, ui: &mut egui::Ui, idx: usize) -> Option<usize> {
+        let colors = self.theme();
+        let size = 72.0;
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+        let painter = ui.painter();
+
+        // Uniform rounded tile background behind every state.
+        painter.rect_filled(rect, 6.0, colors.placeholder);
+
+        match self.thumb_cache.get(&idx) {
+            Some(thumb) => {
+                // Fit the thumbnail inside the slot, preserving aspect ratio.
+                let img_rect = fit_rect_contain(thumb.dims, rect);
+                painter.image(
+                    thumb.texture.id(),
+                    img_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            None if self.failed_thumb.contains(&idx) => {
+                // Definitively failed to decode: subtle placeholder mark.
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "✕",
+                    egui::FontId::proportional(18.0),
+                    colors.muted,
+                );
+            }
+            None => {
+                // Still decoding — background only.
+            }
+        }
+
+        if idx == self.current_index {
+            painter.rect_stroke(
+                rect,
+                6.0,
+                egui::Stroke::new(
+                    2.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(255, 200, 50, 220),
+                ),
+            );
+        } else if response.hovered() {
+            painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0_f32, colors.muted));
+        }
+
+        if response.clicked() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 
     fn draw_filmstrip(&mut self, ctx: &egui::Context) {
         if !self.config.show_filmstrip || self.files.is_empty() {
             return;
         }
-        let opacity = self.config.glass_opacity;
+        let colors = self.theme();
         let len = self.files.len();
 
         // Circular wrap: 3 before + current + 3 after, looping around the ends.
@@ -952,58 +1465,44 @@ impl PhotonioApp {
         };
         let mut clicked: Option<usize> = None;
 
+        // Dock position determines the anchor, offset, and layout direction.
+        let (anchor, offset, vertical) = match self.config.filmstrip_position {
+            config::FilmstripPosition::Bottom => {
+                (egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -64.0), false)
+            }
+            config::FilmstripPosition::Top => {
+                (egui::Align2::CENTER_TOP, egui::vec2(0.0, 64.0), false)
+            }
+            config::FilmstripPosition::Left => {
+                (egui::Align2::LEFT_CENTER, egui::vec2(64.0, 0.0), true)
+            }
+            config::FilmstripPosition::Right => {
+                (egui::Align2::RIGHT_CENTER, egui::vec2(-64.0, 0.0), true)
+            }
+        };
+
         egui::Area::new(egui::Id::new("filmstrip"))
-            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -56.0))
+            .anchor(anchor, offset)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                Self::glass_frame(opacity).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for idx in indices {
-                            let size = 72.0;
-                            let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
-                            let painter = ui.painter();
-                            match self.thumb_cache.get(&idx).map(|t| t.texture.id()) {
-                                Some(id) => {
-                                    painter.image(
-                                        id,
-                                        rect,
-                                        egui::Rect::from_min_max(
-                                            egui::Pos2::ZERO,
-                                            egui::pos2(1.0, 1.0),
-                                        ),
-                                        egui::Color32::WHITE,
-                                    );
-                                }
-                                None => {
-                                    painter.rect_filled(
-                                        rect,
-                                        6.0,
-                                        egui::Color32::from_rgba_unmultiplied(30, 32, 42, 220),
-                                    );
+                colors.panel(ui, |ui| {
+                    if vertical {
+                        ui.vertical(|ui| {
+                            for idx in indices {
+                                if self.filmstrip_tile(ui, idx) == Some(idx) {
+                                    clicked = Some(idx);
                                 }
                             }
-                            if idx == self.current_index {
-                                painter.rect_stroke(
-                                    rect,
-                                    6.0,
-                                    egui::Stroke::new(
-                                        2.0_f32,
-                                        egui::Color32::from_rgba_unmultiplied(255, 200, 50, 220),
-                                    ),
-                                );
-                            } else if response.hovered() {
-                                painter.rect_stroke(
-                                    rect,
-                                    6.0,
-                                    egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(90)),
-                                );
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            for idx in indices {
+                                if self.filmstrip_tile(ui, idx) == Some(idx) {
+                                    clicked = Some(idx);
+                                }
                             }
-                            if response.clicked() {
-                                clicked = Some(idx);
-                            }
-                        }
-                    });
+                        });
+                    }
                 });
             });
 
@@ -1028,7 +1527,12 @@ impl PhotonioApp {
 
         let current = self.current_file().cloned();
         let has_file = current.is_some();
-        let dims = self.image.as_ref().map(|im| im.dimensions).unwrap_or([0, 0]);
+        let dims = self
+            .image
+            .as_ref()
+            .map(|im| im.dimensions)
+            .or_else(|| self.animation.as_ref().map(|a| a.dimensions))
+            .unwrap_or([0, 0]);
 
         let header: Option<(String, u64, String)> = current.as_ref().map(|path| {
             let filename = path
@@ -1043,13 +1547,13 @@ impl PhotonioApp {
 
         let mut action = None;
         let mut should_close = false;
-        let opacity = self.config.glass_opacity;
+        let colors = self.theme();
 
         let response = egui::Area::new(egui::Id::new("context-menu"))
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                Self::glass_frame(opacity).show(ui, |ui| {
+                colors.panel(ui, |ui| {
                     ui.set_min_width(210.0);
                     ui.set_max_width(230.0);
 
@@ -1154,13 +1658,13 @@ impl PhotonioApp {
         }
         let just_opened = std::mem::take(&mut self.help_opened_this_frame);
         let mut open_about = false;
-        let opacity = self.config.glass_opacity;
+        let colors = self.theme();
 
         let response = egui::Area::new(egui::Id::new("help-overlay"))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                Self::glass_frame(opacity).show(ui, |ui| {
+                colors.panel(ui, |ui| {
                     ui.set_min_width(320.0);
                     ui.heading("Shortcuts");
                     ui.separator();
@@ -1172,7 +1676,11 @@ impl PhotonioApp {
                         ("Actual size (100%)", "1"),
                         ("Pan", "Left-drag (when zoomed)"),
                         ("Rotate 90° CW", "R"),
+                        ("Toggle filmstrip", "T"),
+                        ("Play / Pause animation", "Space"),
                         ("Copy path", "Ctrl + C"),
+                        ("Save image as…", "Ctrl + S"),
+                        ("Print…", "Ctrl + P"),
                         ("Open file", "Ctrl + O"),
                         ("Open folder", "Ctrl + Shift + O"),
                         ("Close image", "Ctrl + W"),
@@ -1226,113 +1734,277 @@ impl PhotonioApp {
             return;
         }
         let mut changed = false;
-        let opacity = self.config.glass_opacity;
+        let mut register_clicked = false;
+        let mut folder_menu_clicked = false;
+        let colors = self.theme();
+        let reg_status = self.reg_status.clone();
+        let folder_menu_registered = self.folder_menu_registered;
 
         egui::Area::new(egui::Id::new("settings-modal"))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                Self::glass_frame(opacity).show(ui, |ui| {
-                    ui.set_min_width(380.0);
+                colors.panel(ui, |ui| {
+                    ui.set_min_width(480.0);
                     ui.heading("Settings");
                     ui.separator();
 
-                    // General
-                    ui.label(egui::RichText::new("General").strong());
-                    changed |= ui
-                        .checkbox(
-                            &mut self.config.remember_last_folder,
-                            "Remember last opened folder on startup",
-                        )
-                        .changed();
-                    changed |= ui
-                        .checkbox(
-                            &mut self.config.loop_navigation,
-                            "Loop navigation at folder boundary",
-                        )
-                        .changed();
-                    ui.add_space(4.0);
-                    ui.label("Mouse wheel action:");
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.mouse_wheel_action,
-                            config::MouseWheelAction::Navigate,
-                            "Next / Previous image",
-                        )
-                        .changed();
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.mouse_wheel_action,
-                            config::MouseWheelAction::Zoom,
-                            "Zoom in / out",
-                        )
-                        .changed();
+                    egui::ScrollArea::vertical()
+                        .max_height(640.0)
+                        .show(ui, |ui| {
+                            // General
+                            ui.label(egui::RichText::new("General").strong());
+                            changed |= ui
+                                .checkbox(
+                                    &mut self.config.remember_last_folder,
+                                    "Remember last opened image and folder on startup",
+                                )
+                                .changed();
+                            changed |= ui
+                                .checkbox(
+                                    &mut self.config.loop_navigation,
+                                    "Loop navigation at folder boundary",
+                                )
+                                .changed();
+                            ui.add_space(4.0);
+                            ui.label("Mouse wheel action:");
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.mouse_wheel_action,
+                                    config::MouseWheelAction::Navigate,
+                                    "Next / Previous image",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.mouse_wheel_action,
+                                    config::MouseWheelAction::Zoom,
+                                    "Zoom in / out",
+                                )
+                                .changed();
 
-                    // Navigation
-                    ui.separator();
-                    ui.label(egui::RichText::new("Navigation").strong());
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.hud_position,
-                            config::HudPosition::Bottom,
-                            "HUD on bottom",
-                        )
-                        .changed();
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.hud_position,
-                            config::HudPosition::Top,
-                            "HUD on top",
-                        )
-                        .changed();
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.hud_position,
-                            config::HudPosition::Hidden,
-                            "Hide HUD",
-                        )
-                        .changed();
-                    changed |= ui
-                        .checkbox(&mut self.config.show_filmstrip, "Show Thumbnail Filmstrip")
-                        .changed();
+                            // Navigation
+                            ui.separator();
+                            ui.label(egui::RichText::new("Navigation").strong());
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.hud_position,
+                                    config::HudPosition::Bottom,
+                                    "HUD on bottom",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.hud_position,
+                                    config::HudPosition::Top,
+                                    "HUD on top",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.hud_position,
+                                    config::HudPosition::Hidden,
+                                    "Hide HUD",
+                                )
+                                .changed();
 
-                    // Window & Appearance
-                    ui.separator();
-                    ui.label(egui::RichText::new("Window & Appearance").strong());
-                    changed |= ui
-                        .checkbox(&mut self.config.start_fullscreen, "Start in Fullscreen")
-                        .changed();
-                    ui.add_space(4.0);
-                    ui.label("Canvas background:");
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.canvas_background,
-                            config::CanvasBackground::Glass,
-                            "Translucent Glass",
-                        )
-                        .changed();
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.canvas_background,
-                            config::CanvasBackground::Dark,
-                            "Dark Solid",
-                        )
-                        .changed();
-                    changed |= ui
-                        .radio_value(
-                            &mut self.config.canvas_background,
-                            config::CanvasBackground::Light,
-                            "Light Solid",
-                        )
-                        .changed();
-                    ui.add_space(4.0);
-                    ui.label("Glassmorphism tint / opacity:");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut self.config.glass_opacity, 50..=255))
-                        .changed();
+                            // Filmstrip
+                            ui.separator();
+                            ui.label(egui::RichText::new("Filmstrip").strong());
+                            changed |= ui
+                                .checkbox(
+                                    &mut self.config.show_filmstrip,
+                                    "Show Thumbnail Filmstrip (T)",
+                                )
+                                .changed();
+                            ui.indent("filmstrip_dock", |ui| {
+                                ui.add_enabled_ui(self.config.show_filmstrip, |ui| {
+                                    ui.label("Filmstrip dock position:");
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.filmstrip_position,
+                                            config::FilmstripPosition::Bottom,
+                                            "Bottom",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.filmstrip_position,
+                                            config::FilmstripPosition::Top,
+                                            "Top",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.filmstrip_position,
+                                            config::FilmstripPosition::Left,
+                                            "Left",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.filmstrip_position,
+                                            config::FilmstripPosition::Right,
+                                            "Right",
+                                        )
+                                        .changed();
+                                });
+                            });
+
+                            // Quick-Action Pill
+                            ui.separator();
+                            ui.label(egui::RichText::new("Quick-Action Pill").strong());
+                            changed |= ui
+                                .checkbox(
+                                    &mut self.config.quick_pill_enabled,
+                                    "Enable Quick-Action Pill",
+                                )
+                                .changed();
+                            ui.indent("quick_pill_buttons", |ui| {
+                                ui.add_enabled_ui(self.config.quick_pill_enabled, |ui| {
+                                    changed |= ui.checkbox(&mut self.config.pill_open_file, "Open File").changed();
+                                    changed |= ui.checkbox(&mut self.config.pill_open_folder, "Open Folder").changed();
+                                    changed |= ui.checkbox(&mut self.config.pill_save_as, "Save As…").changed();
+                                    changed |= ui.checkbox(&mut self.config.pill_print, "Print…").changed();
+                                    changed |= ui.checkbox(&mut self.config.pill_share, "Share…").changed();
+                                    changed |= ui.checkbox(&mut self.config.pill_filmstrip, "Toggle Filmstrip").changed();
+                                    ui.add_space(4.0);
+                                    ui.label("Layout:");
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.quick_pill_orientation,
+                                            config::Orientation::Horizontal,
+                                            "Horizontal",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .radio_value(
+                                            &mut self.config.quick_pill_orientation,
+                                            config::Orientation::Vertical,
+                                            "Vertical",
+                                        )
+                                        .changed();
+                                });
+                            });
+
+                            // Window & Appearance
+                            ui.separator();
+                            ui.label(egui::RichText::new("Window & Appearance").strong());
+                            changed |= ui
+                                .checkbox(&mut self.config.start_fullscreen, "Start in Fullscreen")
+                                .changed();
+                            ui.add_space(4.0);
+                            ui.label("Canvas background:");
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.canvas_background,
+                                    config::CanvasBackground::Glass,
+                                    "Translucent Glass",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.canvas_background,
+                                    config::CanvasBackground::Dark,
+                                    "Dark Solid",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut self.config.canvas_background,
+                                    config::CanvasBackground::Light,
+                                    "Light Solid",
+                                )
+                                .changed();
+                            ui.add_space(4.0);
+                            ui.label("Glassmorphism tint / opacity:");
+                            changed |= ui
+                                .add(egui::Slider::new(&mut self.config.glass_opacity, 50..=255))
+                                .changed();
+
+                        });
 
                     ui.separator();
-                    if ui.button("Close").clicked() {
+
+                    // System Integration footer.
+                    match &reg_status {
+                        platform::RegistryStatus::Valid { .. } => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} Windows Integration: Active",
+                                        icons::ICON_CHECK
+                                    ))
+                                    .color(SUCCESS_COLOR),
+                                );
+                                if ui.button("Re-register").clicked() {
+                                    register_clicked = true;
+                                }
+                            });
+                        }
+                        platform::RegistryStatus::Mismatch { registered_path, current_path } => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} Path Mismatch Detected",
+                                    icons::ICON_WARN
+                                ))
+                                .color(WARN_COLOR)
+                                .strong(),
+                            );
+                            ui.label(format!("Registered to: {}", registered_path.display()));
+                            ui.label(format!("Current path: {}", current_path.display()));
+                            if ui.button("Update Registry to Current Path").clicked() {
+                                register_clicked = true;
+                            }
+                        }
+                        platform::RegistryStatus::NotRegistered => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} Windows Integration: Not Registered",
+                                        icons::ICON_CIRCLE
+                                    ))
+                                    .color(colors.muted),
+                                );
+                                if ui.button("Register as Default App Handler").clicked() {
+                                    register_clicked = true;
+                                }
+                            });
+                        }
+                    }
+
+                    ui.separator();
+                    ui.label(egui::RichText::new("Explorer Context Menu").strong());
+                    if folder_menu_registered {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} Folder context menu active",
+                                    icons::ICON_CHECK
+                                ))
+                                .color(SUCCESS_COLOR),
+                            );
+                            if ui.button("Remove Folder Context Menu").clicked() {
+                                folder_menu_clicked = true;
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} Not registered in folder context menu",
+                                    icons::ICON_CIRCLE
+                                ))
+                                .color(colors.muted),
+                            );
+                            if ui.button("Add 'Open folder with Photonio' to Explorer").clicked() {
+                                folder_menu_clicked = true;
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    if colors.ghost_button(ui, "Close").clicked() {
                         self.show_settings = false;
                     }
                 });
@@ -1340,6 +2012,12 @@ impl PhotonioApp {
 
         if changed {
             self.save_config();
+        }
+        if register_clicked {
+            self.refresh_registration();
+        }
+        if folder_menu_clicked {
+            self.toggle_folder_context_menu();
         }
     }
 
@@ -1377,6 +2055,31 @@ fn menu_item_enabled(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Resp
             .frame(false)
             .min_size(egui::vec2(ui.available_width(), 20.0)),
     )
+}
+
+/// A compact, flat glyph button for the quick-action pill.
+fn pill_button(ui: &mut egui::Ui, glyph: &str, tooltip: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(glyph).size(16.0))
+            .frame(false)
+            .min_size(egui::vec2(28.0, 24.0)),
+    )
+    .on_hover_text(tooltip)
+}
+
+/// Fit an image of `dims` (width, height) inside `slot`, preserving its aspect
+/// ratio and centering it. Returns the draw rect for the fitted image.
+fn fit_rect_contain(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
+    let img_w = dims[0].max(1) as f32;
+    let img_h = dims[1].max(1) as f32;
+    let scale = (slot.width() / img_w).min(slot.height() / img_h);
+    let draw_w = img_w * scale;
+    let draw_h = img_h * scale;
+    let min = egui::pos2(
+        slot.center().x - draw_w * 0.5,
+        slot.center().y - draw_h * 0.5,
+    );
+    egui::Rect::from_min_size(min, egui::vec2(draw_w, draw_h))
 }
 
 /// Truncate a string to `max_chars`, appending an ellipsis.
@@ -1460,6 +2163,11 @@ impl eframe::App for PhotonioApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep global widget visuals in sync with the backdrop theme.
+        if ctx.style().visuals.dark_mode != self.is_dark_theme() {
+            apply_global_visuals(ctx, self.is_dark_theme());
+        }
+
         self.ingest_drops(ctx);
         self.poll_loader(ctx);
         // Retry visible-but-missing thumbnails every frame (handles dropped
@@ -1487,7 +2195,7 @@ impl eframe::App for PhotonioApp {
             navigate += 1;
         }
         let wheel_navigates = self.config.mouse_wheel_action == config::MouseWheelAction::Navigate;
-        if wheel_navigates && !input.ctrl && input.scroll != 0.0 {
+        if wheel_navigates && !input.ctrl && input.scroll != 0.0 && !self.modal_open() {
             if input.scroll > 0.0 {
                 navigate -= 1;
             } else {
@@ -1496,6 +2204,7 @@ impl eframe::App for PhotonioApp {
         }
 
         self.apply_hotkeys(ctx, &input);
+        self.handle_animation_input(&input);
 
         if input.toggle_fullscreen {
             Self::toggle_fullscreen(ctx);
@@ -1526,10 +2235,10 @@ impl eframe::App for PhotonioApp {
             self.step(navigate, ctx);
         }
 
-        let hud = self.draw_hud(ctx);
-        if hud.toggle_filmstrip {
-            self.config.show_filmstrip = !self.config.show_filmstrip;
-            self.save_config();
+        self.draw_hud(ctx);
+
+        if let Some(action) = self.draw_quick_pill(ctx) {
+            self.execute_pill_action(action, ctx);
         }
 
         if let Some(action) = self.draw_context_menu(ctx) {
@@ -1568,10 +2277,10 @@ impl eframe::App for PhotonioApp {
             }
         }
 
-        if input.open_file || hud.open_file {
+        if input.open_file {
             self.open_file_dialog(ctx);
         }
-        if input.open_folder || hud.open_folder {
+        if input.open_folder {
             self.open_folder_dialog(ctx);
         }
         if input.copy_path {
@@ -1580,17 +2289,45 @@ impl eframe::App for PhotonioApp {
         if input.reveal {
             self.reveal_current();
         }
+        if input.save_as {
+            self.save_current_as();
+        }
+        if input.print {
+            self.print_current();
+        }
 
         if close_requested {
             self.save_config();
         }
 
         // About modal — rendered last, directly on ctx, outside every panel.
+        let about_dark = self.is_dark_theme();
         about::AboutDialog::show(
             ctx,
             &mut self.show_about,
             self.logo.as_ref().map(|(texture, _)| texture),
             self.config.glass_opacity,
+            about_dark,
         );
+
+        // Animated GIF playback: advance frames on schedule and keep the
+        // animation repainting without wasting CPU between frames.
+        if let Some(anim) = &mut self.animation {
+            if !anim.paused && anim.frames.len() > 1 {
+                let now = std::time::Instant::now();
+                if now >= anim.next_frame {
+                    anim.current_frame = (anim.current_frame + 1) % anim.frames.len();
+                    let delay = anim.delays_ms.get(anim.current_frame).copied().unwrap_or(100);
+                    anim.next_frame = now + std::time::Duration::from_millis(delay);
+                }
+                ctx.request_repaint_after(anim.next_frame.saturating_duration_since(now));
+            }
+        }
+
+        // Safety net: while any decode is in flight, keep scheduling repaints
+        // so a dropped worker wakeup can't leave the UI stuck on a placeholder.
+        if !self.pending_full.is_empty() || !self.pending_thumb.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }

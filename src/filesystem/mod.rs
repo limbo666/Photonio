@@ -6,7 +6,8 @@
 use std::path::{Path, PathBuf};
 
 /// Extensions the viewer can decode (lowercase, no leading dot).
-const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico"];
+const SUPPORTED_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico", "tif", "tiff"];
 
 /// Return every supported image file in `directory`, naturally sorted.
 /// Unreadable entries and subdirectories are skipped; an unreadable directory

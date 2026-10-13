@@ -32,11 +32,32 @@ pub enum HudPosition {
     Hidden,
 }
 
+/// Which screen edge the thumbnail filmstrip is docked to.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmstripPosition {
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+/// Layout direction for the quick-action pill.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    Horizontal,
+    Vertical,
+}
+
 /// Persisted state: settings + last directory + window geometry.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub last_directory: Option<PathBuf>,
+    /// Exact path of the image last viewed (restored on startup when it still
+    /// exists); `last_directory` remains the fallback.
+    pub last_file_path: Option<PathBuf>,
     /// Window position `[x, y]` in logical points.
     pub window_pos: Option<[f32; 2]>,
     /// Window size `[width, height]` in logical points.
@@ -57,12 +78,26 @@ pub struct Config {
     pub hud_position: HudPosition,
     /// Whether the thumbnail filmstrip is shown.
     pub show_filmstrip: bool,
+    /// Which screen edge the thumbnail filmstrip is docked to.
+    pub filmstrip_position: FilmstripPosition,
+    /// Master toggle for the top-right quick-action pill.
+    pub quick_pill_enabled: bool,
+    /// Individual quick-action pill button visibility.
+    pub pill_open_file: bool,
+    pub pill_open_folder: bool,
+    pub pill_save_as: bool,
+    pub pill_print: bool,
+    pub pill_share: bool,
+    pub pill_filmstrip: bool,
+    /// Layout direction of the quick-action pill.
+    pub quick_pill_orientation: Orientation,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             last_directory: None,
+            last_file_path: None,
             window_pos: None,
             window_size: None,
             remember_last_folder: true,
@@ -70,9 +105,18 @@ impl Default for Config {
             mouse_wheel_action: MouseWheelAction::Navigate,
             start_fullscreen: false,
             canvas_background: CanvasBackground::Glass,
-            glass_opacity: 190,
+            glass_opacity: 240,
             hud_position: HudPosition::Bottom,
             show_filmstrip: false,
+            filmstrip_position: FilmstripPosition::Bottom,
+            quick_pill_enabled: true,
+            pill_open_file: true,
+            pill_open_folder: true,
+            pill_save_as: true,
+            pill_print: true,
+            pill_share: true,
+            pill_filmstrip: true,
+            quick_pill_orientation: Orientation::Horizontal,
         }
     }
 }
@@ -115,6 +159,7 @@ mod tests {
     fn round_trips_through_json() {
         let config = Config {
             last_directory: Some(PathBuf::from("C:/pics")),
+            last_file_path: Some(PathBuf::from("C:/pics/img42.jpg")),
             window_pos: Some([100.0, 200.0]),
             window_size: Some([800.0, 600.0]),
             mouse_wheel_action: MouseWheelAction::Zoom,
@@ -122,11 +167,16 @@ mod tests {
             glass_opacity: 120,
             hud_position: HudPosition::Top,
             show_filmstrip: true,
+            filmstrip_position: FilmstripPosition::Right,
+            quick_pill_enabled: false,
+            pill_save_as: false,
+            quick_pill_orientation: Orientation::Vertical,
             ..Default::default()
         };
         let json = serde_json::to_string(&config).expect("serialize");
         let decoded: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.last_directory, config.last_directory);
+        assert_eq!(decoded.last_file_path, config.last_file_path);
         assert_eq!(decoded.window_pos, config.window_pos);
         assert_eq!(decoded.window_size, config.window_size);
         assert_eq!(decoded.mouse_wheel_action, MouseWheelAction::Zoom);
@@ -134,6 +184,10 @@ mod tests {
         assert_eq!(decoded.glass_opacity, 120);
         assert_eq!(decoded.hud_position, HudPosition::Top);
         assert!(decoded.show_filmstrip);
+        assert_eq!(decoded.filmstrip_position, FilmstripPosition::Right);
+        assert!(!decoded.quick_pill_enabled);
+        assert!(!decoded.pill_save_as);
+        assert_eq!(decoded.quick_pill_orientation, Orientation::Vertical);
     }
 
     #[test]
@@ -141,11 +195,17 @@ mod tests {
         let old = r#"{"last_directory": null, "window_pos": null, "window_size": null}"#;
         let decoded: Config = serde_json::from_str(old).expect("deserialize");
         assert!(decoded.remember_last_folder);
+        assert!(decoded.last_file_path.is_none());
         assert!(decoded.loop_navigation);
         assert_eq!(decoded.mouse_wheel_action, MouseWheelAction::Navigate);
         assert_eq!(decoded.canvas_background, CanvasBackground::Glass);
-        assert_eq!(decoded.glass_opacity, 190);
+        assert_eq!(decoded.glass_opacity, 240);
         assert_eq!(decoded.hud_position, HudPosition::Bottom);
         assert!(!decoded.show_filmstrip);
+        assert_eq!(decoded.filmstrip_position, FilmstripPosition::Bottom);
+        assert!(decoded.quick_pill_enabled);
+        assert!(decoded.pill_open_file);
+        assert!(decoded.pill_print);
+        assert_eq!(decoded.quick_pill_orientation, Orientation::Horizontal);
     }
 }

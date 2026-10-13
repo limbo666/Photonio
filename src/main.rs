@@ -11,8 +11,10 @@ mod app;
 mod assets;
 mod config;
 mod filesystem;
+mod icons;
 mod loader;
 mod platform;
+mod theme;
 mod viewer;
 
 use app::PhotonioApp;
@@ -20,9 +22,11 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let config = config::Config::load();
+    // Optional file path from CLI / double-click / "Open With".
+    let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Photonio")
+        .with_title(format!("Photonio v{}", env!("CARGO_PKG_VERSION")))
         .with_inner_size([960.0, 640.0])
         .with_min_inner_size([320.0, 240.0])
         .with_transparent(true); // transparent window (prep for DWM Mica/Acrylic)
@@ -53,6 +57,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Photonio",
         native_options,
-        Box::new(move |cc| Ok(Box::new(PhotonioApp::new(cc, config)))),
+        Box::new(move |cc| Ok(Box::new(PhotonioApp::new(cc, config, cli_path)))),
     )
 }

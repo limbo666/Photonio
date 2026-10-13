@@ -48,6 +48,41 @@ pub fn set_wallpaper(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Launch the native Windows Print Wizard for `path` via the shell "print"
+/// verb (works on Windows 10/11 regardless of which app owns the file type).
+pub fn print_image(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // NUL-terminated UTF-16 buffers for the verb and the file path.
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb: Vec<u16> = "print".encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: `wide` and `verb` are valid NUL-terminated UTF-16 buffers that
+    // outlive the call; the remaining parameters are valid nulls.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW returns a value greater than 32 on success.
+    if (result as isize) > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecuteW (print) failed: code {}", result as isize))
+    }
+}
+
 /// Place `path` on the clipboard as `CF_HDROP` so Explorer can paste the file
 /// itself (a real file copy, not just text).
 pub fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
@@ -57,3 +92,10 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     clipboard_win::raw::set_file_list(&[path.display().to_string()])
         .map_err(|e| format!("set file list: {e}"))
 }
+
+mod windows;
+
+pub use windows::{
+    add_folder_context_menu, check_registration_status, is_folder_context_menu_registered,
+    remove_folder_context_menu, update_registration, RegistryStatus,
+};
