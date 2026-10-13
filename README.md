@@ -1,7 +1,7 @@
 # Photonio
 
 <p align="center">
-  <img src="images/photonio-logo.png" alt="Photonio logo" width="160">
+  <img src="images/logo.png" alt="Photonio logo" width="160">
 </p>
 
 <p align="center">
