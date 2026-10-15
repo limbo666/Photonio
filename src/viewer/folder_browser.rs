@@ -4,6 +4,7 @@
 //          a bounded thumbnail cache and a generation counter so results from a
 //          previous navigation are discarded.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
@@ -45,9 +46,42 @@ struct Listing {
     truncated: bool,
 }
 
+/// A detected drive root plus its (lazily resolved) volume label.
+struct DriveEntry {
+    root: String,
+    label: Option<String>,
+}
+
+/// Cached quick-access sidebar data (standard folders + drives), built once per
+/// browser instance so drive/volume detection never runs on the UI frame loop.
+struct QuickAccess {
+    folders: Vec<(String, PathBuf)>,
+    drives: Vec<DriveEntry>,
+}
+
+impl QuickAccess {
+    fn build() -> Self {
+        let mut folders = Vec::new();
+        if let Some(d) = dirs::desktop_dir() {
+            folders.push(("Desktop".to_string(), d));
+        }
+        if let Some(d) = dirs::picture_dir() {
+            folders.push(("Pictures".to_string(), d));
+        }
+        if let Some(d) = dirs::document_dir() {
+            folders.push(("Documents".to_string(), d));
+        }
+        let drives = platform::list_logical_drives()
+            .into_iter()
+            .map(|root| DriveEntry { root, label: None })
+            .collect();
+        Self { folders, drives }
+    }
+}
+
 enum WorkerMsg {
-    Listing { gen: u64, listing: Listing },
     Thumb { gen: u64, key: PathBuf, rgba: Vec<u8>, dims: [usize; 2] },
+    Done { gen: u64 },
 }
 
 struct Cover {
@@ -101,7 +135,7 @@ pub struct Browser {
     pub current: PathBuf,
     pub selected: Option<PathBuf>,
     listing: Listing,
-    scanning: bool,
+    covers_loading: bool,
     generation: u64,
     rx: Option<Receiver<WorkerMsg>>,
     thumbs: ThumbCache,
@@ -110,15 +144,34 @@ pub struct Browser {
     pub tile_size: config::FolderTileSize,
     pub filter: config::ContentFilter,
     pub show_files: bool,
+    quick: QuickAccess,
+    labels_rx: Option<Receiver<HashMap<String, String>>>,
 }
 
 impl Browser {
     pub fn new(start: PathBuf, cfg: &config::Config) -> Self {
+        let quick = QuickAccess::build();
+
+        // Resolve volume labels on a background thread (non-blocking): some
+        // removable/network drives can stall `GetVolumeInformationW`. Results
+        // are cached on `self.quick` once received in `poll()`.
+        let drive_roots: Vec<String> = quick.drives.iter().map(|d| d.root.clone()).collect();
+        let (tx, labels_rx) = channel();
+        std::thread::spawn(move || {
+            let mut labels = HashMap::new();
+            for root in drive_roots {
+                if let Some(label) = platform::drive_volume_label(&root) {
+                    labels.insert(root, label);
+                }
+            }
+            let _ = tx.send(labels);
+        });
+
         let mut b = Self {
             current: start.clone(),
             selected: None,
             listing: Listing { folders: Vec::new(), files: Vec::new(), truncated: false },
-            scanning: false,
+            covers_loading: false,
             generation: 0,
             rx: None,
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
@@ -127,36 +180,70 @@ impl Browser {
             tile_size: cfg.folder_tile_size,
             filter: cfg.folder_content_filter,
             show_files: cfg.folder_show_files,
+            quick,
+            labels_rx: Some(labels_rx),
         };
         b.navigate(start);
         b
     }
 
-    /// Navigate to `path`, kicking off a background scan.
+    /// Navigate to `path`: enumerate direct children synchronously so the cards
+    /// appear on frame one, then lazily discover covers + decode thumbnails on a
+    /// background thread (never blocking the UI).
     pub fn navigate(&mut self, path: PathBuf) {
         self.current = path.clone();
         self.selected = None;
         self.path_edit = path.display().to_string();
         self.path_invalid = false;
-        self.scanning = true;
         self.generation = self.generation.wrapping_add(1);
         let gen = self.generation;
+
+        // Instant direct-children listing — no recursion, no image decode.
+        self.listing = scan_direct_children(&path, self.filter, self.show_files);
+
+        // Background: lazily resolve covers (one level) and decode thumbnails.
+        let folders: Vec<PathBuf> =
+            self.listing.folders.iter().map(|f| f.path.clone()).collect();
+        let image_files: Vec<PathBuf> = self
+            .listing
+            .files
+            .iter()
+            .filter(|f| f.kind == FileKind::Image)
+            .map(|f| f.path.clone())
+            .collect();
+        let thumb_side = thumb_side(self.tile_size);
         let (tx, rx) = channel();
         self.rx = Some(rx);
-
-        let thumb_side = thumb_side(self.tile_size);
-        let filter = self.filter;
-        let show_files = self.show_files;
+        self.covers_loading = true;
         std::thread::spawn(move || {
-            let (listing, thumbs) = scan_directory(&path, filter, show_files, thumb_side);
-            if tx.send(WorkerMsg::Listing { gen, listing }).is_err() {
-                return;
-            }
-            for (key, rgba, dims) in thumbs {
-                if tx.send(WorkerMsg::Thumb { gen, key, rgba, dims }).is_err() {
-                    return;
+            let mut sent = 0usize;
+            // Folder covers first (the "album jacket" thumbnails).
+            for folder in folders {
+                if sent >= MAX_THUMBS {
+                    break;
+                }
+                if let Some(cover_path) = find_cover(&folder) {
+                    if let Some((rgba, dims)) = make_thumb(&cover_path, thumb_side) {
+                        if tx.send(WorkerMsg::Thumb { gen, key: folder, rgba, dims }).is_err() {
+                            return;
+                        }
+                        sent += 1;
+                    }
                 }
             }
+            // Loose image files.
+            for file in image_files {
+                if sent >= MAX_THUMBS {
+                    break;
+                }
+                if let Some((rgba, dims)) = make_thumb(&file, thumb_side) {
+                    if tx.send(WorkerMsg::Thumb { gen, key: file, rgba, dims }).is_err() {
+                        return;
+                    }
+                    sent += 1;
+                }
+            }
+            let _ = tx.send(WorkerMsg::Done { gen });
         });
     }
 
@@ -172,15 +259,26 @@ impl Browser {
 
     /// Drain worker messages; upload textures for the current generation.
     pub fn poll(&mut self, ctx: &egui::Context) {
+        // Cache volume labels once the background resolver finishes.
+        if let Some(labels_rx) = self.labels_rx.take() {
+            match labels_rx.try_recv() {
+                Ok(labels) => {
+                    for drive in &mut self.quick.drives {
+                        if let Some(label) = labels.get(&drive.root) {
+                            drive.label = Some(label.clone());
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.labels_rx = Some(labels_rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+
         let Some(rx) = &self.rx else { return };
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                WorkerMsg::Listing { gen, listing } => {
-                    if gen == self.generation {
-                        self.listing = listing;
-                        self.scanning = false;
-                    }
-                }
                 WorkerMsg::Thumb { gen, key, rgba, dims } => {
                     if gen == self.generation {
                         let color = egui::ColorImage::from_rgba_unmultiplied(dims, &rgba);
@@ -192,9 +290,14 @@ impl Browser {
                         self.thumbs.insert(key, Cover { texture, dims });
                     }
                 }
+                WorkerMsg::Done { gen } => {
+                    if gen == self.generation {
+                        self.covers_loading = false;
+                    }
+                }
             }
         }
-        if self.scanning {
+        if self.covers_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(60));
         }
     }
@@ -235,7 +338,9 @@ impl Browser {
             .unwrap_or_else(|| ctx.screen_rect().size());
         let max = (main_size - egui::vec2(40.0, 60.0)).max(egui::vec2(200.0, 150.0));
 
-        egui::Window::new(format!("{} Browse Folders", icons::ICON_FOLDER))
+        egui::Window::new(
+            egui::RichText::new(format!("{} Browse Folders", icons::ICON_FOLDER)).size(13.0),
+        )
             .open(open)
             .collapsible(false)
             .resizable(true)
@@ -266,53 +371,74 @@ impl Browser {
                     }
                 });
 
-                // Breadcrumbs.
+                // Breadcrumbs — clean, borderless clickable text.
                 ui.horizontal_wrapped(|ui| {
                     let crumbs = breadcrumbs(&self.current);
                     for (i, (label, path)) in crumbs.iter().enumerate() {
                         if i > 0 {
-                            ui.label("›");
+                            ui.label(
+                                egui::RichText::new("›").size(13.0).color(colors.muted),
+                            );
                         }
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new(label).small()).frame(false))
-                            .clicked()
-                        {
+                        let text = egui::RichText::new(label).size(13.0);
+                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
                             navigate_to = Some(path.clone());
                         }
                     }
                 });
+                ui.separator();
 
-                // View + filter + files toggle (wraps on narrow windows).
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("View:");
-                    ui.selectable_value(
-                        &mut self.tile_size,
-                        config::FolderTileSize::Small,
-                        "Small",
-                    );
-                    ui.selectable_value(
-                        &mut self.tile_size,
-                        config::FolderTileSize::Medium,
-                        "Medium",
-                    );
-                    ui.selectable_value(
-                        &mut self.tile_size,
-                        config::FolderTileSize::Large,
-                        "Large",
-                    );
-                    ui.selectable_value(&mut self.tile_size, config::FolderTileSize::List, "List");
-                    ui.separator();
-                    ui.label("Show:");
-                    ui.selectable_value(
-                        &mut self.filter,
-                        config::ContentFilter::Images,
-                        "Images",
-                    );
-                    ui.selectable_value(&mut self.filter, config::ContentFilter::Media, "Media");
-                    ui.selectable_value(&mut self.filter, config::ContentFilter::All, "All");
-                    ui.separator();
-                    ui.checkbox(&mut self.show_files, "Show files");
-                });
+                // View + filter toolbar: a full-width, subtle tinted strip.
+                let strip_tint = if colors.dark_mode {
+                    egui::Color32::from_white_alpha(8)
+                } else {
+                    egui::Color32::from_black_alpha(8)
+                };
+                egui::Frame::none()
+                    .fill(strip_tint)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                    .show(ui, |ui| {
+                        // Force the tint to span the entire window width.
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("View:");
+                            ui.selectable_value(
+                                &mut self.tile_size,
+                                config::FolderTileSize::Small,
+                                "Small",
+                            );
+                            ui.selectable_value(
+                                &mut self.tile_size,
+                                config::FolderTileSize::Medium,
+                                "Medium",
+                            );
+                            ui.selectable_value(
+                                &mut self.tile_size,
+                                config::FolderTileSize::Large,
+                                "Large",
+                            );
+                            ui.selectable_value(
+                                &mut self.tile_size,
+                                config::FolderTileSize::List,
+                                "List",
+                            );
+                            ui.separator();
+                            ui.label("Show:");
+                            ui.selectable_value(
+                                &mut self.filter,
+                                config::ContentFilter::Images,
+                                "Images",
+                            );
+                            ui.selectable_value(
+                                &mut self.filter,
+                                config::ContentFilter::Media,
+                                "Media",
+                            );
+                            ui.selectable_value(&mut self.filter, config::ContentFilter::All, "All");
+                            ui.separator();
+                            ui.checkbox(&mut self.show_files, "Show files");
+                        });
+                    });
                 ui.separator();
 
                 // Reserve room below the body for the trailing separator and the
@@ -329,20 +455,55 @@ impl Browser {
                 ui.horizontal_top(|ui| {
                     // --- Sidebar ---
                     ui.vertical(|ui| {
-                        ui.set_width(140.0);
-                        ui.label(egui::RichText::new("Quick Access").strong());
-                        for (label, path) in quick_access() {
+                        ui.set_width(160.0);
+
+                        // Section header.
+                        ui.label(
+                            egui::RichText::new("QUICK ACCESS")
+                                .size(10.0)
+                                .color(colors.muted),
+                        );
+                        ui.add_space(4.0);
+
+                        // Standard folders.
+                        for (label, path) in &self.quick.folders {
+                            let text = format!("{}  {}", icons::ICON_FOLDER, label);
                             if ui
                                 .add(
-                                    egui::Button::new(label)
+                                    egui::Button::new(text)
                                         .frame(false)
                                         .min_size(egui::vec2(ui.available_width(), 20.0)),
                                 )
                                 .clicked()
                             {
-                                navigate_to = Some(path);
+                                navigate_to = Some(path.clone());
                             }
                         }
+
+                        ui.separator();
+
+                        // Drives (with cached volume labels, once resolved).
+                        for drive in &self.quick.drives {
+                            let text = match &drive.label {
+                                Some(label) => {
+                                    format!("{}  {} ({})", icons::ICON_HDD, drive.root, label)
+                                }
+                                None => format!("{}  {}", icons::ICON_HDD, drive.root),
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(text)
+                                        .frame(false)
+                                        .min_size(egui::vec2(ui.available_width(), 20.0)),
+                                )
+                                .clicked()
+                            {
+                                navigate_to = Some(PathBuf::from(&drive.root));
+                            }
+                        }
+
+                        // Placeholder separator for Phase 2 pinned folders.
+                        ui.separator();
                     });
 
                     // Vertical divider between the sidebar and the content.
@@ -361,32 +522,31 @@ impl Browser {
                     );
 
                     // --- Content (bounded scroll + natural wrap) ---
+                    // The enclosing `horizontal_top` gives the ScrollArea a
+                    // horizontal layout, which makes labels *extend* (no wrap)
+                    // and overflow the window width. Force a vertical layout so
+                    // rows stack and text wraps/truncates to the available width.
                     egui::ScrollArea::vertical()
                         .id_source("folder-browser-content")
                         .auto_shrink([false, false])
                         .max_height(body_h)
                         .show(ui, |ui| {
-                            if self.scanning && self.listing.folders.is_empty() {
-                                ui.horizontal(|ui| {
-                                    ui.add(egui::Spinner::new());
-                                    ui.label("Scanning…");
-                                });
-                            }
+                            ui.vertical(|ui| {
+                                if self.listing.truncated {
+                                    ui.label(
+                                        egui::RichText::new("(more files not shown)")
+                                            .small()
+                                            .italics()
+                                            .color(colors.muted),
+                                    );
+                                }
 
-                            if self.listing.truncated {
-                                ui.label(
-                                    egui::RichText::new("(more files not shown)")
-                                        .small()
-                                        .italics()
-                                        .color(colors.muted),
-                                );
-                            }
-
-                            if self.tile_size == config::FolderTileSize::List {
-                                self.render_list(ui, colors, &mut navigate_to, &mut select_path);
-                            } else {
-                                self.render_grid(ui, colors, &mut navigate_to, &mut select_path);
-                            }
+                                if self.tile_size == config::FolderTileSize::List {
+                                    self.render_list(ui, colors, &mut navigate_to, &mut select_path);
+                                } else {
+                                    self.render_grid(ui, colors, &mut navigate_to, &mut select_path);
+                                }
+                            });
                         });
                 });
 
@@ -464,7 +624,7 @@ impl Browser {
         navigate_to: &mut Option<PathBuf>,
         select_path: &mut Option<PathBuf>,
     ) {
-        let (tile_w, tile_h, _thumb) = tile_geom(self.tile_size);
+        let geom = tile_geom(self.tile_size);
         let folder_count = self.listing.folders.len();
         let file_count = self.listing.files.len();
         if folder_count + file_count == 0 {
@@ -474,10 +634,10 @@ impl Browser {
         // Natural wrapping; the enclosing ScrollArea provides vertical scroll.
         ui.horizontal_wrapped(|ui| {
             for index in 0..folder_count {
-                self.render_folder_tile(ui, colors, tile_w, tile_h, index, navigate_to, select_path);
+                self.render_folder_tile(ui, colors, &geom, index, navigate_to, select_path);
             }
             for index in 0..file_count {
-                self.render_file_tile(ui, colors, tile_w, tile_h, index);
+                self.render_file_tile(ui, colors, &geom, index);
             }
         });
     }
@@ -486,60 +646,65 @@ impl Browser {
         &mut self,
         ui: &mut egui::Ui,
         colors: &theme::ThemeColors,
-        tile_w: f32,
-        tile_h: f32,
+        geom: &TileGeom,
         index: usize,
         navigate_to: &mut Option<PathBuf>,
         select_path: &mut Option<PathBuf>,
     ) {
         let Some(entry) = self.listing.folders.get(index) else { return };
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(geom.card_w, geom.card_h), egui::Sense::click());
+        let response = response.on_hover_text(entry.name.clone());
         let painter = ui.painter();
-        let card = rect.shrink(4.0);
+        let card = rect;
         let selected = self.selected.as_deref() == Some(entry.path.as_path());
 
+        // Unified dark card frame.
         painter.rect_filled(card, 6.0, colors.placeholder);
-        if selected {
-            painter.rect_stroke(card, 6.0, egui::Stroke::new(2.0_f32, colors.primary));
+        let border = if selected {
+            egui::Stroke::new(2.0_f32, colors.primary)
         } else if response.hovered() {
-            painter.rect_stroke(card, 6.0, egui::Stroke::new(1.0_f32, colors.muted));
-        }
+            egui::Stroke::new(1.5_f32, colors.muted)
+        } else {
+            egui::Stroke::new(1.0_f32, colors.border)
+        };
+        painter.rect_stroke(card, 6.0, border);
 
-        // Cover preview.
-        let thumb_side = thumb_side(self.tile_size) as f32;
-        let thumb_box = egui::Rect::from_center_size(
-            egui::pos2(card.center().x, card.min.y + 6.0 + thumb_side / 2.0),
-            egui::vec2(thumb_side, thumb_side),
+        let thumb_box = egui::Rect::from_min_size(
+            egui::pos2(card.min.x + CARD_PAD, card.min.y + CARD_PAD),
+            egui::vec2(geom.thumb_w, geom.thumb_h),
         );
         match self.thumbs.get(&entry.path) {
             Some(cover) => {
-                let img_rect = fit_rect_contain(cover.dims, thumb_box);
-                painter.image(
-                    cover.texture.id(),
-                    img_rect,
-                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
+                // Album jacket: letterboxed cover inside a subtle sleeve border.
+                paint_thumb(&painter, cover, thumb_box, false, 3.0);
+                painter.rect_stroke(thumb_box, 3.0, egui::Stroke::new(1.0_f32, colors.border));
             }
             None => {
+                // Empty / non-image folder: centered muted folder glyph.
                 painter.text(
                     thumb_box.center(),
                     egui::Align2::CENTER_CENTER,
                     icons::ICON_FOLDER,
-                    egui::FontId::proportional(thumb_side * 0.5),
+                    egui::FontId::proportional(geom.thumb_h * 0.6),
                     colors.muted,
                 );
             }
         }
 
-        // Name.
-        painter.text(
-            egui::pos2(card.min.x + 6.0, card.max.y - 16.0),
-            egui::Align2::LEFT_CENTER,
-            truncate(&entry.name, 20),
-            egui::FontId::proportional(11.0),
+        let label_rect = egui::Rect::from_min_size(
+            egui::pos2(card.min.x + CARD_PAD, card.min.y + CARD_PAD + geom.thumb_h),
+            egui::vec2(geom.thumb_w, LABEL_H),
+        );
+        // Folder label: muted folder glyph in front of the primary name.
+        paint_card_label(
+            ui,
+            &painter,
+            label_rect,
+            &entry.name,
             colors.primary,
+            Some(icons::ICON_FOLDER),
+            colors.muted,
         );
 
         if response.double_clicked() {
@@ -553,34 +718,34 @@ impl Browser {
         &mut self,
         ui: &mut egui::Ui,
         colors: &theme::ThemeColors,
-        tile_w: f32,
-        tile_h: f32,
+        geom: &TileGeom,
         index: usize,
     ) {
         let Some(entry) = self.listing.files.get(index) else { return };
-        let (rect, _response) =
-            ui.allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(geom.card_w, geom.card_h), egui::Sense::hover());
+        let response = response.on_hover_text(entry.name.clone());
         let painter = ui.painter();
-        let card = rect.shrink(4.0);
+        let card = rect;
 
-        // Dimmed (display-only) background.
-        painter.rect_filled(card, 6.0, egui::Color32::from_white_alpha(6));
+        // Unified dark card frame.
+        painter.rect_filled(card, 6.0, colors.placeholder);
+        let border = if response.hovered() {
+            egui::Stroke::new(1.5_f32, colors.muted)
+        } else {
+            egui::Stroke::new(1.0_f32, colors.border)
+        };
+        painter.rect_stroke(card, 6.0, border);
 
-        let thumb_side = thumb_side(self.tile_size) as f32;
-        let thumb_box = egui::Rect::from_center_size(
-            egui::pos2(card.center().x, card.min.y + 6.0 + thumb_side / 2.0),
-            egui::vec2(thumb_side, thumb_side),
+        let thumb_box = egui::Rect::from_min_size(
+            egui::pos2(card.min.x + CARD_PAD, card.min.y + CARD_PAD),
+            egui::vec2(geom.thumb_w, geom.thumb_h),
         );
         match entry.kind {
             FileKind::Image => {
                 if let Some(cover) = self.thumbs.get(&entry.path) {
-                    let img_rect = fit_rect_contain(cover.dims, thumb_box);
-                    painter.image(
-                        cover.texture.id(),
-                        img_rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                        egui::Color32::from_white_alpha(160),
-                    );
+                    // Standalone photo: fills the inner area edge-to-edge.
+                    paint_thumb(&painter, cover, thumb_box, true, 3.0);
                 }
             }
             FileKind::Video => {
@@ -588,20 +753,19 @@ impl Browser {
                     thumb_box.center(),
                     egui::Align2::CENTER_CENTER,
                     icons::ICON_FILMSTRIP,
-                    egui::FontId::proportional(thumb_side * 0.5),
+                    egui::FontId::proportional(geom.thumb_h * 0.5),
                     colors.muted,
                 );
             }
             FileKind::Other => {}
         }
 
-        painter.text(
-            egui::pos2(card.min.x + 6.0, card.max.y - 16.0),
-            egui::Align2::LEFT_CENTER,
-            truncate(&entry.name, 20),
-            egui::FontId::proportional(11.0),
-            colors.muted,
+        let label_rect = egui::Rect::from_min_size(
+            egui::pos2(card.min.x + CARD_PAD, card.min.y + CARD_PAD + geom.thumb_h),
+            egui::vec2(geom.thumb_w, LABEL_H),
         );
+        // File label: no folder glyph.
+        paint_card_label(ui, &painter, label_rect, &entry.name, colors.muted, None, colors.muted);
     }
 
     fn render_list(
@@ -617,11 +781,14 @@ impl Browser {
             return;
         }
 
+        // Comfortable, legible row height (balanced vertical padding).
+        ui.spacing_mut().interact_size.y = 26.0;
+
         for index in 0..folder_count {
             let entry = &self.listing.folders[index];
             let selected = self.selected.as_deref() == Some(entry.path.as_path());
             let text = egui::RichText::new(format!("{}  {}", icons::ICON_FOLDER, entry.name))
-                .small();
+                .size(14.0);
             let resp = ui.add(egui::SelectableLabel::new(selected, text));
             if resp.double_clicked() {
                 *navigate_to = Some(entry.path.clone());
@@ -644,14 +811,14 @@ impl Browser {
             };
             let size_str = format_size(entry.size);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(icon).color(colors.muted));
+                ui.label(egui::RichText::new(icon).size(14.0).color(colors.muted));
 
                 // The trailing "kind" and "size" columns have a fixed width.
                 // Reserve it and let the name truncate to the remainder; if the
                 // name consumed all available width first, the trailing columns
                 // would overflow and expand the resizable window to its maximum
                 // width (the same bug class as the grid).
-                let small = egui::FontId::proportional(11.0);
+                let small = egui::FontId::proportional(12.0);
                 let trailing_w = ui.fonts(|f| {
                     f.layout_no_wrap(kind.to_owned(), small.clone(), egui::Color32::WHITE)
                         .size()
@@ -660,7 +827,7 @@ impl Browser {
                             .size()
                             .x
                 }) + ui.spacing().item_spacing.x * 2.0;
-                let name_w = (ui.available_width() - trailing_w).max(30.0);
+                let name_w = (ui.available_width() - trailing_w).max(40.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(name_w, ui.spacing().interact_size.y),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -669,8 +836,8 @@ impl Browser {
                     },
                 );
 
-                ui.label(egui::RichText::new(kind).small().color(colors.muted));
-                ui.label(egui::RichText::new(size_str).small().color(colors.muted));
+                ui.label(egui::RichText::new(kind).size(12.0).color(colors.muted));
+                ui.label(egui::RichText::new(size_str).size(12.0).color(colors.muted));
             });
         }
     }
@@ -678,22 +845,124 @@ impl Browser {
 
 // --- Helpers ---
 
+/// Uniform inset of the thumbnail (and label side padding) within the card.
+const CARD_PAD: f32 = 6.0;
+/// Height reserved for the (two-line, ellipsized) filename label.
+const LABEL_H: f32 = 30.0;
+
+/// Card dimensions for a view-size preset (uniform across folders and files).
+struct TileGeom {
+    card_w: f32,
+    card_h: f32,
+    thumb_w: f32,
+    thumb_h: f32,
+}
+
+/// Decode max-side for cover thumbnails (matches the larger thumb box edge).
 fn thumb_side(size: config::FolderTileSize) -> u32 {
     match size {
-        config::FolderTileSize::Small => 56,
-        config::FolderTileSize::Medium => 84,
-        config::FolderTileSize::Large => 124,
+        config::FolderTileSize::Small => 88,
+        config::FolderTileSize::Medium => 128,
+        config::FolderTileSize::Large => 168,
         config::FolderTileSize::List => 20,
     }
 }
 
-fn tile_geom(size: config::FolderTileSize) -> (f32, f32, u32) {
-    match size {
-        config::FolderTileSize::Small => (76.0, 88.0, 56),
-        config::FolderTileSize::Medium => (104.0, 116.0, 84),
-        config::FolderTileSize::Large => (144.0, 156.0, 124),
-        config::FolderTileSize::List => (0.0, 24.0, 20),
+/// Card + thumbnail-box layout for a view-size preset.
+fn tile_geom(size: config::FolderTileSize) -> TileGeom {
+    let (card_w, card_h) = match size {
+        config::FolderTileSize::Small => (100.0, 110.0),
+        config::FolderTileSize::Medium => (140.0, 150.0),
+        config::FolderTileSize::Large => (180.0, 190.0),
+        config::FolderTileSize::List => (0.0, 0.0),
+    };
+    TileGeom {
+        card_w,
+        card_h,
+        thumb_w: card_w - CARD_PAD * 2.0,
+        thumb_h: card_h - CARD_PAD * 2.0 - LABEL_H,
     }
+}
+
+/// Draw a cover texture into `slot` with rounded corners. `cover_fit` fills the
+/// slot edge-to-edge (cover crop); otherwise the image is letterboxed (contain).
+fn paint_thumb(
+    painter: &egui::Painter,
+    cover: &Cover,
+    slot: egui::Rect,
+    cover_fit: bool,
+    rounding: f32,
+) {
+    let (target, uv) = if cover_fit {
+        (slot, cover_uv(cover.dims, slot))
+    } else {
+        (
+            fit_rect_contain(cover.dims, slot),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        )
+    };
+    painter.add(egui::epaint::RectShape {
+        rect: target,
+        rounding: egui::Rounding::same(rounding),
+        fill: egui::Color32::WHITE,
+        stroke: egui::Stroke::NONE,
+        blur_width: 0.0,
+        fill_texture_id: cover.texture.id(),
+        uv,
+    });
+}
+
+/// UV rect (0..1) that center-crops `dims` to cover `slot`.
+fn cover_uv(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
+    let img_w = dims[0].max(1) as f32;
+    let img_h = dims[1].max(1) as f32;
+    let scale = (slot.width() / img_w).max(slot.height() / img_h);
+    let fx = (slot.width() / (img_w * scale)).min(1.0);
+    let fy = (slot.height() / (img_h * scale)).min(1.0);
+    egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(fx, fy))
+}
+
+/// Paint a filename label constrained to `rect`, wrapping to at most two lines
+/// with an ellipsis; the text is centered horizontally. `icon` (optional) is a
+/// leading FontAwesome glyph rendered in `icon_color` (e.g. a folder glyph).
+fn paint_card_label(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    color: egui::Color32,
+    icon: Option<&str>,
+    icon_color: egui::Color32,
+) {
+    let font = egui::FontId::proportional(11.0);
+    let mut job = egui::text::LayoutJob::default();
+    if let Some(icon) = icon {
+        job.append(
+            &format!("{icon}  "),
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: icon_color,
+                ..Default::default()
+            },
+        );
+    }
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = rect.width();
+    job.wrap.max_rows = 2;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let pos = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top());
+    painter.galley(pos, galley, color);
 }
 
 fn file_kind(path: &Path) -> FileKind {
@@ -753,20 +1022,20 @@ fn make_thumb(path: &Path, max_side: u32) -> Option<(Vec<u8>, [usize; 2])> {
     Some((thumb.to_rgba8().into_raw(), dims))
 }
 
-/// Scan `dir` on a background thread: folders + filtered files + thumbnails.
-fn scan_directory(
+/// Enumerate `dir`'s direct children (folders + filtered files). No recursion
+/// and no image decoding, so it is fast enough to run on the UI thread and the
+/// listing appears on the first frame after navigation.
+fn scan_direct_children(
     dir: &Path,
     filter: config::ContentFilter,
     show_files: bool,
-    thumb_side: u32,
-) -> (Listing, Vec<(PathBuf, Vec<u8>, [usize; 2])>) {
+) -> Listing {
     let mut folders = Vec::new();
     let mut files = Vec::new();
-    let mut thumbs = Vec::new();
     let mut truncated = false;
 
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (Listing { folders, files, truncated: false }, thumbs);
+        return Listing { folders, files, truncated: false };
     };
 
     for entry in entries.flatten() {
@@ -778,16 +1047,10 @@ fn scan_directory(
         }
 
         if meta.is_dir() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let cover = find_cover(&path);
-            folders.push(FolderEntry { name, path: path.clone() });
-            if let Some(cover_path) = cover {
-                if thumbs.len() < MAX_THUMBS {
-                    if let Some((rgba, dims)) = make_thumb(&cover_path, thumb_side) {
-                        thumbs.push((path, rgba, dims));
-                    }
-                }
-            }
+            folders.push(FolderEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path,
+            });
         } else if show_files {
             let kind = file_kind(&path);
             let show = match filter {
@@ -802,11 +1065,6 @@ fn scan_directory(
                     truncated = true;
                     continue;
                 }
-                if kind == FileKind::Image && thumbs.len() < MAX_THUMBS {
-                    if let Some((rgba, dims)) = make_thumb(&path, thumb_side) {
-                        thumbs.push((path.clone(), rgba, dims));
-                    }
-                }
                 files.push(FileEntry {
                     name: entry.file_name().to_string_lossy().into_owned(),
                     path,
@@ -820,7 +1078,7 @@ fn scan_directory(
     folders.sort_by(|a, b| natord::compare(&a.name.to_lowercase(), &b.name.to_lowercase()));
     files.sort_by(|a, b| natord::compare(&a.name.to_lowercase(), &b.name.to_lowercase()));
 
-    (Listing { folders, files, truncated }, thumbs)
+    Listing { folders, files, truncated }
 }
 
 /// Resolve a starting directory: use `remembered` if it still exists, else walk
@@ -853,23 +1111,6 @@ pub fn resolve_start(remembered: Option<PathBuf>) -> PathBuf {
     PathBuf::from("C:\\")
 }
 
-fn quick_access() -> Vec<(String, PathBuf)> {
-    let mut items = Vec::new();
-    if let Some(d) = dirs::desktop_dir() {
-        items.push(("Desktop".to_string(), d));
-    }
-    if let Some(d) = dirs::picture_dir() {
-        items.push(("Pictures".to_string(), d));
-    }
-    if let Some(d) = dirs::document_dir() {
-        items.push(("Documents".to_string(), d));
-    }
-    for drive in platform::list_logical_drives() {
-        items.push((drive.clone(), PathBuf::from(&drive)));
-    }
-    items
-}
-
 fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
     let mut crumbs: Vec<(String, PathBuf)> = path
         .ancestors()
@@ -883,16 +1124,6 @@ fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
         .collect();
     crumbs.reverse();
     crumbs
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() > max_chars {
-        let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    } else {
-        s.to_string()
-    }
 }
 
 fn format_size(bytes: u64) -> String {

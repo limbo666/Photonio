@@ -49,6 +49,43 @@ pub fn list_logical_drives() -> Vec<String> {
     drives
 }
 
+/// Query a drive's volume label (e.g. `C:\` → "Local Disk"). Returns `None`
+/// for unlabeled drives or if the Win32 call fails. Callers should cache the
+/// result — this touches the volume and must not run on a hot UI loop.
+pub fn drive_volume_label(root: &str) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+
+    let root_wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut label = vec![0u16; 261]; // MAX_PATH (260) + NUL
+
+    // SAFETY: `root_wide` is a NUL-terminated buffer that outlives the call;
+    // `label` is a writable buffer of `label.len()` u16s. All other out-params
+    // are null pointers because only the label is needed.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root_wide.as_ptr(),
+            label.as_mut_ptr(),
+            label.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    let len = label.iter().position(|&c| c == 0).unwrap_or(label.len());
+    let label = String::from_utf16_lossy(&label[..len]).trim().to_string();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label)
+    }
+}
+
 /// Set the desktop wallpaper to `path` via the Win32 API.
 pub fn set_wallpaper(path: &Path) -> Result<(), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
