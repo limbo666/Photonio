@@ -6,7 +6,7 @@
 use eframe::egui;
 
 /// The logo PNG, embedded at compile time.
-pub const LOGO_PNG: &[u8] = include_bytes!("../images/photonio-logo.png");
+pub const LOGO_PNG: &[u8] = include_bytes!("../images/logo.png");
 
 /// Decode the logo into an egui `ColorImage` + dimensions.
 /// Returns `None` if the bytes are not a valid image (graceful fallback).

@@ -8,6 +8,8 @@ use eframe::egui::{
     self, Align2, Color32, RichText, Stroke, TextureHandle, Vec2, Window,
 };
 
+use crate::theme::ThemeColors;
+
 pub struct AboutDialog;
 
 impl AboutDialog {
@@ -16,10 +18,12 @@ impl AboutDialog {
         open: &mut bool,
         logo_texture: Option<&TextureHandle>,
         glass_alpha: u8,
+        dark_mode: bool,
     ) {
         if !*open {
             return;
         }
+        let colors = ThemeColors::new(dark_mode, glass_alpha);
 
         Window::new("photonio_about_modal_v2")
             .title_bar(false)
@@ -29,9 +33,9 @@ impl AboutDialog {
             .fixed_size(Vec2::new(340.0, 320.0))
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgba_premultiplied(20, 20, 25, glass_alpha))
+                    .fill(colors.panel_fill)
                     .rounding(12.0)
-                    .stroke(Stroke::new(1.0_f32, Color32::from_white_alpha(45)))
+                    .stroke(Stroke::new(1.0_f32, colors.border))
                     .shadow(egui::Shadow {
                         offset: Vec2::ZERO,
                         blur: 24.0,
@@ -43,6 +47,7 @@ impl AboutDialog {
             .show(ctx, |ui| {
                 ui.set_width(340.0);
                 ui.set_height(320.0);
+                colors.apply(ui);
 
                 ui.vertical_centered(|ui| {
                     // 1. Clean logo (no rings or borders).
@@ -59,9 +64,13 @@ impl AboutDialog {
                     ui.heading(
                         RichText::new("Photonio Image Viewer")
                             .strong()
-                            .color(Color32::WHITE),
+                            .color(colors.primary),
                     );
-                    ui.label(RichText::new("v0.9.5").size(12.0).color(Color32::from_gray(160)));
+                    ui.label(
+                        RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .size(12.0)
+                            .color(colors.muted),
+                    );
 
                     ui.add_space(4.0);
 
@@ -70,7 +79,7 @@ impl AboutDialog {
                         RichText::new("A fast, lightweight vibe coding project built with Rust.")
                             .italics()
                             .size(12.0)
-                            .color(Color32::from_gray(180)),
+                            .color(colors.muted),
                     );
 
                     ui.add_space(8.0);
@@ -79,13 +88,13 @@ impl AboutDialog {
                     ui.label(
                         RichText::new("Created by Nikos Georgousis")
                             .size(13.0)
-                            .color(Color32::WHITE),
+                            .color(colors.primary),
                     );
 
                     ui.add_space(4.0);
 
                     // 5. Links — one centered row, two clickable parts.
-                    centered_links_row(ui);
+                    centered_links_row(ui, &colors);
 
                     ui.add_space(4.0);
 
@@ -95,10 +104,24 @@ impl AboutDialog {
                         "https://www.apache.org/licenses/LICENSE-2.0",
                     );
 
+                    ui.add_space(6.0);
+
+                    // 6b. Icon attribution.
+                    ui.label(
+                        RichText::new(
+                            "Icons powered by Font Awesome 7 Free (CC BY 4.0 / SIL OFL 1.1)",
+                        )
+                        .size(11.0)
+                        .color(colors.muted),
+                    );
+
                     ui.add_space(12.0);
 
                     // 7. Close button.
-                    if ui.button(RichText::new("   Close   ").size(13.0)).clicked() {
+                    if colors
+                        .ghost_button(ui, RichText::new("   Close   ").size(13.0))
+                        .clicked()
+                    {
                         *open = false;
                     }
                 });
@@ -109,7 +132,7 @@ impl AboutDialog {
 /// Render "www.georgousis.info • GitHub" as one centered row with two clickable
 /// parts. egui 0.28 left-aligns horizontal layouts, so we measure the exact
 /// text width and pad the left side to center it.
-fn centered_links_row(ui: &mut egui::Ui) {
+fn centered_links_row(ui: &mut egui::Ui, colors: &ThemeColors) {
     let body_font = egui::FontId::proportional(14.0);
 
     let (site_w, bullet_w, github_w) = ui.fonts(|f| {
@@ -129,7 +152,7 @@ fn centered_links_row(ui: &mut egui::Ui) {
         ui.add_space(offset);
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.hyperlink_to("www.georgousis.info", "https://www.georgousis.info");
-        ui.label(RichText::new("•").color(Color32::from_gray(120)));
+        ui.label(RichText::new("•").color(colors.muted));
         ui.hyperlink_to("GitHub", "https://github.com/limbo666/Photonio");
     });
 }
