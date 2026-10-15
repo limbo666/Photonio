@@ -147,7 +147,7 @@ impl Default for Config {
             loop_navigation: true,
             mouse_wheel_action: MouseWheelAction::Navigate,
             start_fullscreen: false,
-            canvas_background: CanvasBackground::Glass,
+            canvas_background: CanvasBackground::Light,
             glass_opacity: 240,
             hud_position: HudPosition::Bottom,
             show_filmstrip: false,
@@ -279,7 +279,7 @@ mod tests {
         assert!(decoded.last_file_path.is_none());
         assert!(decoded.loop_navigation);
         assert_eq!(decoded.mouse_wheel_action, MouseWheelAction::Navigate);
-        assert_eq!(decoded.canvas_background, CanvasBackground::Glass);
+        assert_eq!(decoded.canvas_background, CanvasBackground::Light);
         assert_eq!(decoded.glass_opacity, 240);
         assert_eq!(decoded.hud_position, HudPosition::Bottom);
         assert!(!decoded.show_filmstrip);

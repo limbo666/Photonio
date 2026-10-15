@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// Extensions the viewer can decode (lowercase, no leading dot).
 const SUPPORTED_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico", "tif", "tiff"];
+    &["png", "jpg", "jpeg", "jfif", "webp", "bmp", "gif", "ico", "tif", "tiff"];
 
 /// Return every supported image file in `directory`, naturally sorted.
 /// Unreadable entries and subdirectories are skipped; an unreadable directory
@@ -73,6 +73,8 @@ mod tests {
     #[test]
     fn accepts_supported_extensions_case_insensitively() {
         assert!(has_supported_extension(Path::new("photo.JPG")));
+        assert!(has_supported_extension(Path::new("photo.jpeg")));
+        assert!(has_supported_extension(Path::new("photo.jfif")));
         assert!(has_supported_extension(Path::new("photo.png")));
         assert!(!has_supported_extension(Path::new("notes.txt")));
         assert!(!has_supported_extension(Path::new("no_extension")));

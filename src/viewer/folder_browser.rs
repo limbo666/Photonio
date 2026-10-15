@@ -65,6 +65,9 @@ impl QuickAccess {
         if let Some(d) = dirs::desktop_dir() {
             folders.push(("Desktop".to_string(), d));
         }
+        if let Some(d) = dirs::download_dir() {
+            folders.push(("Downloads".to_string(), d));
+        }
         if let Some(d) = dirs::picture_dir() {
             folders.push(("Pictures".to_string(), d));
         }
@@ -1138,8 +1141,8 @@ fn file_kind(path: &Path) -> FileKind {
         .map(|e| e.to_ascii_lowercase());
     match ext.as_deref() {
         Some("mp4") | Some("mkv") | Some("avi") | Some("mov") | Some("webm") => FileKind::Video,
-        Some("jpg") | Some("jpeg") | Some("png") | Some("webp") | Some("tif")
-        | Some("tiff") | Some("bmp") | Some("gif") => FileKind::Image,
+        Some("jpg") | Some("jpeg") | Some("jfif") | Some("png") | Some("webp")
+        | Some("tif") | Some("tiff") | Some("bmp") | Some("gif") => FileKind::Image,
         _ => FileKind::Other,
     }
 }

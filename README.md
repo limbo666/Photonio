@@ -6,17 +6,33 @@
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-2ea44f" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-v0.9.10-3b82f6" alt="Version v0.9.10">
+  <img src="https://img.shields.io/badge/version-v0.9.11-3b82f6" alt="Version v0.9.11">
 </p>
 
 **A high-performance, lightweight, glassmorphic image viewer for Windows 10/11 — built in pure Rust with `egui`/`eframe`.**
 
-Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no clutter. Decoding runs on dedicated background threads with priority scheduling, so browsing stays fluid even over large photo collections. The interface is a frosted-glass overlay with Font Awesome iconography and a dynamic Light/Dark theme.
+Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no clutter. Decoding runs on dedicated background threads with priority scheduling, so browsing stays fluid even over large photo collections. The interface is a frosted-glass overlay with Font Awesome iconography and dynamic Light / Dark / Glass themes (Light by default).
+
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/demo-01.png" alt="Photonio viewing a demo image" width="640">
+  <br>
+  <em>Viewing a demo image</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/demo-02.png" alt="Photonio start screen" width="640">
+  <br>
+  <em>Start screen</em>
+</p>
+
+A royalty-free demo image is included at [`demo/demo.jpg`](demo/demo.jpg) — drop it onto the window or pass it on the command line to try the viewer immediately.
 
 ## Features
 
 - **Fast, non-blocking loading** — full-res and thumbnail decoders run on separate worker threads, with circular ring preloading and priority scheduling so the active image is always decoded first.
-- **Broad format support** — JPEG, PNG, BMP, GIF, TIFF, WebP, and ICO, with EXIF rotation applied automatically.
+- **Broad format support** — JPEG (including `.jfif`), PNG, BMP, GIF, TIFF, WebP, and ICO, with EXIF rotation applied automatically.
 - **Animated playback** — multi-frame **GIF** and **Animated WebP** play, loop, pause (`Space`), and step frame-by-frame (`[` / `]`).
 - **Dynamic filmstrip** — 4-way docking (Bottom / Top / Left / Right), aspect-ratio-preserving thumbnails, and a hotkey toggle (`T`).
 - **Quick-Action Pill** — a customizable top-right icon toolbar (Open File, Open Folder, Save As, Print, Share, Toggle Filmstrip) with horizontal or vertical layouts.

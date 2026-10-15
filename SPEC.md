@@ -11,7 +11,7 @@
 ## 2. Technology Stack
 - **Language:** Rust (2021 edition)
 - **GUI Engine:** `eframe` / `egui` (0.28+)
-- **Image Pipeline:** `image` crate (PNG, JPEG, WebP, GIF, BMP, ICO)
+- **Image Pipeline:** `image` crate (PNG, JPEG/JFIF, TIFF, WebP, GIF, BMP, ICO)
 - **Platform APIs:**
   - `rfd` (Native Windows file picker dialogs)
   - `open` (Shell "Open With" integration)

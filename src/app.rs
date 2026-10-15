@@ -306,6 +306,9 @@ pub struct PhotonioApp {
     help_opened_this_frame: bool,
     /// Transient feedback badge: (message, when shown).
     feedback: Option<(String, std::time::Instant)>,
+    /// When an empty (no supported images) folder was opened; drives a
+    /// self-dismissing notice that returns to the start screen after 7s.
+    empty_folder_since: Option<std::time::Instant>,
     /// Windows registration health. `None` until the async inspector has run;
     /// refreshed (non-blocking) when Settings opens.
     registry_status: Option<platform::RegistryStatus>,
@@ -399,6 +402,7 @@ impl PhotonioApp {
             folder_browser: None,
             help_opened_this_frame: false,
             feedback: None,
+            empty_folder_since: None,
             registry_status: None,
             folder_menu_registered: false,
             checking_registry: false,
@@ -755,6 +759,7 @@ impl PhotonioApp {
         }
 
         self.clear_caches();
+        self.empty_folder_since = None;
         match path.parent() {
             Some(dir) => {
                 self.config.last_directory = Some(dir.to_path_buf());
@@ -778,11 +783,13 @@ impl PhotonioApp {
         self.files = filesystem::scan_directory(&dir);
         if self.files.is_empty() {
             self.image = None;
-            self.error = Some("No supported images found in folder".to_string());
+            self.error = None;
+            self.empty_folder_since = Some(std::time::Instant::now());
             self.current_index = 0;
             self.config.last_file_path = None;
             self.reset_viewport();
         } else {
+            self.empty_folder_since = None;
             self.current_index = 0;
             self.navigate_to(0, ctx);
         }
@@ -798,11 +805,15 @@ impl PhotonioApp {
                 .collect()
         });
 
-        if let Some(path) = dropped.into_iter().next() {
+        // Open the first valid drop: a directory is scanned as a folder, a file
+        // is loaded as an image. Missing/special paths are skipped.
+        for path in dropped {
             if path.is_dir() {
                 self.open_directory(path, ctx);
-            } else {
+                return;
+            } else if path.is_file() {
                 self.open_file(path, ctx);
+                return;
             }
         }
     }
@@ -826,6 +837,7 @@ impl PhotonioApp {
         self.files.clear();
         self.image = None;
         self.error = None;
+        self.empty_folder_since = None;
         self.current_index = 0;
         self.reset_viewport();
         self.clear_caches();
@@ -857,7 +869,10 @@ impl PhotonioApp {
     fn open_file_dialog(&mut self, ctx: &egui::Context) {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Open Image")
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico"]);
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "jfif", "webp", "bmp", "gif", "ico"],
+            );
         if let Some(dir) = &self.config.last_directory {
             dialog = dialog.set_directory(dir);
         }
@@ -1045,7 +1060,7 @@ impl PhotonioApp {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Save Image As")
             .add_filter("PNG", &["png"])
-            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("JPEG", &["jpg", "jpeg", "jfif"])
             .add_filter("BMP", &["bmp"])
             .add_filter("WebP", &["webp"]);
         if let Some(dir) = &self.config.last_directory {
@@ -1684,8 +1699,8 @@ impl PhotonioApp {
         );
     }
 
-    /// Draw the error or branded empty state, dead-centered via an Area.
-    fn draw_no_image(&self, ui: &mut egui::Ui) {
+    /// Draw the error, empty-folder notice, or branded empty state.
+    fn draw_no_image(&mut self, ui: &mut egui::Ui) {
         // A background decode is in flight → show a centered spinner.
         if self.loading_index.is_some() {
             egui::Area::new(egui::Id::new("loading-spinner"))
@@ -1695,6 +1710,20 @@ impl PhotonioApp {
                     ui.add(egui::Spinner::new());
                 });
             return;
+        }
+
+        // Empty-folder notice: show for 7s, then return to the start screen.
+        if let Some(since) = self.empty_folder_since {
+            const NOTICE_SECS: u64 = 7;
+            let elapsed = since.elapsed();
+            if elapsed < std::time::Duration::from_secs(NOTICE_SECS) {
+                let remaining = std::time::Duration::from_secs(NOTICE_SECS) - elapsed;
+                ui.ctx().request_repaint_after(remaining);
+                self.draw_empty_folder_notice(ui.ctx());
+                return;
+            }
+            // Expired → fall through to the branded empty state.
+            self.empty_folder_since = None;
         }
 
         match &self.error {
@@ -1729,6 +1758,11 @@ impl PhotonioApp {
             egui::Color32::from_rgb(205, 205, 214)
         } else {
             egui::Color32::from_rgb(60, 60, 66)
+        };
+        let key_color = if dark {
+            egui::Color32::from_rgb(255, 200, 50)
+        } else {
+            egui::Color32::from_rgb(178, 118, 10)
         };
 
         egui::Area::new(egui::Id::new("empty-state"))
@@ -1767,11 +1801,63 @@ impl PhotonioApp {
                         .color(version_color),
                     );
                     ui.add_space(16.0);
-                    // 5. Guidance hint.
+                    // 5. Guidance hints (centered).
                     ui.label(
-                        egui::RichText::new("Drop an image or press Ctrl+O to open")
+                        egui::RichText::new("Drop an image or folder.")
                             .size(14.0)
                             .color(hint_color),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Press ").size(14.0).color(hint_color));
+                        ui.label(egui::RichText::new("Ctrl + O").size(14.0).color(key_color));
+                        ui.label(
+                            egui::RichText::new(" to open file or ")
+                                .size(14.0)
+                                .color(hint_color),
+                        );
+                        ui.label(
+                            egui::RichText::new("Ctrl + Shift + O")
+                                .size(14.0)
+                                .color(key_color),
+                        );
+                        ui.label(
+                            egui::RichText::new(" to open folder.")
+                                .size(14.0)
+                                .color(hint_color),
+                        );
+                    });
+                });
+            });
+    }
+
+    /// "No supported images" notice: a large icon + message, shown briefly after
+    /// opening a folder that contains no supported image files.
+    fn draw_empty_folder_notice(&self, ctx: &egui::Context) {
+        let dark = self.is_dark_theme();
+        let icon_color = if dark {
+            egui::Color32::from_gray(140)
+        } else {
+            egui::Color32::from_gray(120)
+        };
+        let text_color = if dark {
+            egui::Color32::from_gray(190)
+        } else {
+            egui::Color32::from_gray(70)
+        };
+
+        egui::Area::new(egui::Id::new("empty-folder-notice"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(icons::ICON_IMAGE).size(84.0).color(icon_color),
+                    );
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new("No supported images in this folder")
+                            .size(16.0)
+                            .color(text_color),
                     );
                 });
             });
@@ -3616,7 +3702,7 @@ fn format_name(path: &Path) -> String {
         .map(|e| e.to_ascii_lowercase());
     match ext.as_deref() {
         Some("png") => "PNG".into(),
-        Some("jpg") | Some("jpeg") => "JPEG".into(),
+        Some("jpg") | Some("jpeg") | Some("jfif") => "JPEG".into(),
         Some("webp") => "WebP".into(),
         Some("bmp") => "BMP".into(),
         Some("gif") => "GIF".into(),

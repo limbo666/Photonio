@@ -14,7 +14,7 @@ pub enum RegistryStatus {
 
 /// Supported image extensions registered for Windows file association.
 const REGISTERED_EXTENSIONS: &[&str] =
-    &[".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff"];
+    &[".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif", ".tiff"];
 
 /// Check whether the HKCU registration points at the current executable.
 pub fn check_registration_status() -> RegistryStatus {

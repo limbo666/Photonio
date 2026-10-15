@@ -112,7 +112,7 @@ fn format_name(path: &Path) -> String {
         .map(|e| e.to_ascii_lowercase());
     match ext.as_deref() {
         Some("png") => "PNG".into(),
-        Some("jpg") | Some("jpeg") => "JPEG".into(),
+        Some("jpg") | Some("jpeg") | Some("jfif") => "JPEG".into(),
         Some("webp") => "WebP".into(),
         Some("bmp") => "BMP".into(),
         Some("gif") => "GIF".into(),
