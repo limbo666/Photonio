@@ -16,15 +16,10 @@ Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/demo-01.png" alt="Photonio viewing a demo image" width="640">
-  <br>
-  <em>Viewing a demo image</em>
-</p>
-
-<p align="center">
-  <img src="screenshots/demo-02.png" alt="Photonio start screen" width="640">
-  <br>
-  <em>Start screen</em>
+  <img src="screenshots/screenshot-1.png" alt="Photonio screenshot 1" width="340">
+  <img src="screenshots/screenshot-2.png" alt="Photonio screenshot 2" width="340"><br>
+  <img src="screenshots/screenshot-3.png" alt="Photonio screenshot 3" width="340">
+  <img src="screenshots/screenshot-4.png" alt="Photonio screenshot 4" width="340">
 </p>
 
 A royalty-free demo image is included at [`demo/demo.jpg`](demo/demo.jpg) — drop it onto the window or pass it on the command line to try the viewer immediately.
