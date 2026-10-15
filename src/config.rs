@@ -130,6 +130,8 @@ pub struct Config {
     pub folder_content_filter: ContentFilter,
     /// Show files (not just folders) in the custom folder browser.
     pub folder_show_files: bool,
+    /// User-pinned Quick Access folders (persisted; sanitized on load).
+    pub pinned_folders: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -165,6 +167,7 @@ impl Default for Config {
             folder_tile_size: FolderTileSize::Medium,
             folder_content_filter: ContentFilter::Images,
             folder_show_files: true,
+            pinned_folders: Vec::new(),
         }
     }
 }
@@ -181,10 +184,23 @@ impl Config {
 
     /// Load config from disk; a missing or corrupt file yields defaults.
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
+        let mut config: Self = std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        config.sanitize_pinned();
+        config
+    }
+
+    /// Drop duplicate and non-existent pinned folders (defensive on load).
+    fn sanitize_pinned(&mut self) {
+        let mut deduped: Vec<PathBuf> = Vec::new();
+        for path in std::mem::take(&mut self.pinned_folders) {
+            if path.is_dir() && !deduped.contains(&path) {
+                deduped.push(path);
+            }
+        }
+        self.pinned_folders = deduped;
     }
 
     /// Write config to disk, creating the directory if needed. Best-effort:
@@ -219,6 +235,7 @@ mod tests {
             quick_pill_enabled: false,
             pill_save_as: false,
             quick_pill_orientation: Orientation::Vertical,
+            pinned_folders: vec![PathBuf::from("C:/pics"), PathBuf::from("C:/pics/family")],
             ..Default::default()
         };
         let json = serde_json::to_string(&config).expect("serialize");
@@ -245,6 +262,10 @@ mod tests {
         assert_eq!(decoded.folder_tile_size, FolderTileSize::Medium);
         assert_eq!(decoded.folder_content_filter, ContentFilter::Images);
         assert!(decoded.folder_show_files);
+        assert_eq!(
+            decoded.pinned_folders,
+            vec![PathBuf::from("C:/pics"), PathBuf::from("C:/pics/family")]
+        );
     }
 
     #[test]
@@ -273,5 +294,6 @@ mod tests {
         assert_eq!(decoded.folder_tile_size, FolderTileSize::Medium);
         assert_eq!(decoded.folder_content_filter, ContentFilter::Images);
         assert!(decoded.folder_show_files);
+        assert!(decoded.pinned_folders.is_empty());
     }
 }

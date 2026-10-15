@@ -1,6 +1,6 @@
 [package]
 name = "photonio"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2021"
 
 [dependencies]
@@ -30,3 +30,5 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", 
 [build-dependencies]
 # Embeds the Windows executable icon via build.rs.
 winres = "0.1"
+# Decodes logof.png and encodes the multi-size ICO at build time.
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }

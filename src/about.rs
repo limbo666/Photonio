@@ -129,7 +129,7 @@ impl AboutDialog {
     }
 }
 
-/// Render "www.georgousis.info • GitHub" as one centered row with two clickable
+/// Render "georgousis.info • GitHub" as one centered row with two clickable
 /// parts. egui 0.28 left-aligns horizontal layouts, so we measure the exact
 /// text width and pad the left side to center it.
 fn centered_links_row(ui: &mut egui::Ui, colors: &ThemeColors) {
@@ -141,7 +141,7 @@ fn centered_links_row(ui: &mut egui::Ui, colors: &ThemeColors) {
                 .size()
                 .x
         };
-        (m("www.georgousis.info"), m("•"), m("GitHub"))
+        (m("georgousis.info"), m("•"), m("GitHub"))
     });
 
     // Two item-spacing gaps of 8.0 between the three parts.
@@ -151,7 +151,7 @@ fn centered_links_row(ui: &mut egui::Ui, colors: &ThemeColors) {
     ui.horizontal(|ui| {
         ui.add_space(offset);
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.hyperlink_to("www.georgousis.info", "https://www.georgousis.info");
+        ui.hyperlink_to("georgousis.info", "https://www.georgousis.info");
         ui.label(RichText::new("•").color(colors.muted));
         ui.hyperlink_to("GitHub", "https://github.com/limbo666/Photonio");
     });

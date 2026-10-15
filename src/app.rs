@@ -913,7 +913,19 @@ impl PhotonioApp {
                     Some(PendingOperation::OpenFolder) => {
                         self.config.last_open_folder = Some(path.clone());
                         self.save_config();
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
                         self.open_directory(path, ctx);
+                        let count = self.files.len();
+                        self.show_status(format!(
+                            "{} {} | {} {}",
+                            icons::ICON_FOLDER,
+                            name,
+                            icons::ICON_IMAGE,
+                            count
+                        ));
                     }
                     Some(PendingOperation::CopyFileTo) => {
                         self.config.last_copy_folder = Some(path.clone());
@@ -930,6 +942,22 @@ impl PhotonioApp {
                         }
                     }
                     None => {}
+                }
+            }
+            viewer::folder_browser::BrowserResult::Pin(path) => {
+                if !self.config.pinned_folders.contains(&path) {
+                    self.config.pinned_folders.push(path);
+                    self.save_config();
+                }
+                if let Some(browser) = self.folder_browser.as_mut() {
+                    browser.pinned = self.config.pinned_folders.clone();
+                }
+            }
+            viewer::folder_browser::BrowserResult::Unpin(path) => {
+                self.config.pinned_folders.retain(|p| p != &path);
+                self.save_config();
+                if let Some(browser) = self.folder_browser.as_mut() {
+                    browser.pinned = self.config.pinned_folders.clone();
                 }
             }
         }
@@ -1548,7 +1576,7 @@ impl PhotonioApp {
 
     fn take_status_text(&mut self) -> Option<String> {
         let (message, at) = self.feedback.as_ref()?;
-        if at.elapsed() > std::time::Duration::from_secs(2) {
+        if at.elapsed() > std::time::Duration::from_secs(3) {
             self.feedback = None;
             return None;
         }
@@ -1563,7 +1591,13 @@ impl PhotonioApp {
         let rect = ui.max_rect();
         self.image_rect = None; // reset; set below when an image is drawn
 
-        if input.secondary_clicked && input.pointer_pos.map_or(false, |p| rect.contains(p)) {
+        // Suppress the global right-click menu while the folder browser modal is
+        // open, so a right-click on a pinned item doesn't leak a second menu
+        // behind the dialog.
+        if !self.show_folder_browser
+            && input.secondary_clicked
+            && input.pointer_pos.map_or(false, |p| rect.contains(p))
+        {
             self.context_menu_pos = input.pointer_pos;
             self.show_help = false;
             self.show_about = false;
@@ -1844,26 +1878,47 @@ impl PhotonioApp {
         let vertical = self.config.quick_pill_orientation == config::Orientation::Vertical;
         let mut action = None;
 
+        // Orientation-specific inner padding: tight cross-axis margin and
+        // slightly larger end caps, with a matching inter-button gap.
+        let margin = if vertical {
+            egui::Margin::symmetric(4.0, 7.0) // snug left/right, 7px vertical caps
+        } else {
+            egui::Margin::symmetric(7.0, 4.0) // 7px horizontal caps, tight top/bottom
+        };
+
         egui::Area::new(egui::Id::new("quick-action-pill"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_opacity(opacity);
-                colors.panel(ui, |ui| {
-                    if vertical {
-                        ui.vertical(|ui| {
-                            if let Some(a) = self.pill_buttons(ui) {
-                                action = Some(a);
-                            }
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            if let Some(a) = self.pill_buttons(ui) {
-                                action = Some(a);
-                            }
-                        });
-                    }
-                });
+                egui::Frame::none()
+                    .fill(colors.panel_fill)
+                    .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                    .rounding(10.0)
+                    .inner_margin(margin)
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 4.0),
+                        blur: 18.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(150),
+                    })
+                    .show(ui, |ui| {
+                        colors.apply(ui);
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        if vertical {
+                            ui.vertical(|ui| {
+                                if let Some(a) = self.pill_buttons(ui) {
+                                    action = Some(a);
+                                }
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                if let Some(a) = self.pill_buttons(ui) {
+                                    action = Some(a);
+                                }
+                            });
+                        }
+                    });
             });
 
         action
@@ -1895,15 +1950,19 @@ impl PhotonioApp {
         }
         if self.config.pill_share {
             // Placeholder — disabled until sharing is implemented.
-            ui.add_enabled(
-                false,
-                egui::Button::new(egui::RichText::new(icons::ICON_SHARE).size(16.0))
-                    .frame(false)
-                    .min_size(egui::vec2(28.0, 24.0)),
-            )
-            .on_hover_text("Share (coming soon)");
+            ui.add_enabled_ui(false, |ui| {
+                ui.add_sized(
+                    egui::vec2(32.0, 32.0),
+                    egui::Button::new(egui::RichText::new(icons::ICON_SHARE).size(18.0))
+                        .frame(false)
+                        .min_size(egui::vec2(32.0, 32.0)),
+                )
+                .on_hover_text("Share (coming soon)");
+            });
         }
         if self.config.pill_filmstrip {
+            // Separator: file actions (above) vs. interface actions (filmstrip).
+            ui.separator();
             if pill_button(
                 ui,
                 icons::ICON_FILMSTRIP,
@@ -2552,7 +2611,9 @@ impl PhotonioApp {
                 color: egui::Color32::from_black_alpha(150),
             });
 
-        egui::Window::new(format!("{}  Settings", icons::ICON_GEAR))
+        egui::Window::new(
+            egui::RichText::new(format!("{}  Settings", icons::ICON_GEAR)).size(13.0),
+        )
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -3354,21 +3415,23 @@ fn menu_item_enabled(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Resp
     )
 }
 
-/// A compact, flat glyph button for the quick-action pill.
+/// A compact, flat glyph button for the quick-action pill: a strict square
+/// hit-box with the icon dead-centered.
 fn pill_button(
     ui: &mut egui::Ui,
     glyph: &str,
     tooltip: &str,
     highlighted: bool,
 ) -> egui::Response {
-    let mut text = egui::RichText::new(glyph).size(16.0);
+    let mut text = egui::RichText::new(glyph).size(18.0);
     if highlighted {
         text = text.color(GIF_COLOR);
     }
-    ui.add(
+    ui.add_sized(
+        egui::vec2(32.0, 32.0),
         egui::Button::new(text)
             .frame(false)
-            .min_size(egui::vec2(28.0, 24.0)),
+            .min_size(egui::vec2(32.0, 32.0)),
     )
     .on_hover_text(tooltip)
 }
@@ -3685,13 +3748,18 @@ impl eframe::App for PhotonioApp {
                 self.step(viewer_navigate, ctx);
             }
 
-            self.draw_hud(ctx);
+            // Hide the background HUD (navigation pill, quick-action pill, and
+            // filmstrip) while the folder browser modal is open, so it stays
+            // visually clean. Their config flags are left untouched.
+            if !self.show_folder_browser {
+                self.draw_hud(ctx);
 
-            if let Some(action) = self.draw_quick_pill(ctx) {
-                self.execute_pill_action(action, ctx);
+                if let Some(action) = self.draw_quick_pill(ctx) {
+                    self.execute_pill_action(action, ctx);
+                }
+
+                self.draw_filmstrip(ctx);
             }
-
-            self.draw_filmstrip(ctx);
         }
 
         if let Some(action) = self.draw_context_menu(ctx) {

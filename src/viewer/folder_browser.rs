@@ -128,6 +128,8 @@ pub enum BrowserResult {
     None,
     Select(PathBuf),
     Cancel,
+    Pin(PathBuf),
+    Unpin(PathBuf),
 }
 
 /// State for the custom folder browser modal.
@@ -139,13 +141,16 @@ pub struct Browser {
     generation: u64,
     rx: Option<Receiver<WorkerMsg>>,
     thumbs: ThumbCache,
-    path_edit: String,
+    temp_path_buffer: String,
+    is_editing_path: bool,
+    address_focus_pending: bool,
     path_invalid: bool,
     pub tile_size: config::FolderTileSize,
     pub filter: config::ContentFilter,
     pub show_files: bool,
     quick: QuickAccess,
     labels_rx: Option<Receiver<HashMap<String, String>>>,
+    pub pinned: Vec<PathBuf>,
 }
 
 impl Browser {
@@ -175,13 +180,16 @@ impl Browser {
             generation: 0,
             rx: None,
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
-            path_edit: start.display().to_string(),
+            temp_path_buffer: start.display().to_string(),
+            is_editing_path: false,
+            address_focus_pending: false,
             path_invalid: false,
             tile_size: cfg.folder_tile_size,
             filter: cfg.folder_content_filter,
             show_files: cfg.folder_show_files,
             quick,
             labels_rx: Some(labels_rx),
+            pinned: cfg.pinned_folders.clone(),
         };
         b.navigate(start);
         b
@@ -193,7 +201,8 @@ impl Browser {
     pub fn navigate(&mut self, path: PathBuf) {
         self.current = path.clone();
         self.selected = None;
-        self.path_edit = path.display().to_string();
+        self.temp_path_buffer = path.display().to_string();
+        self.is_editing_path = false;
         self.path_invalid = false;
         self.generation = self.generation.wrapping_add(1);
         let gen = self.generation;
@@ -245,16 +254,6 @@ impl Browser {
             }
             let _ = tx.send(WorkerMsg::Done { gen });
         });
-    }
-
-    /// Jump to the path typed into the address field (no-op if invalid).
-    fn jump_to_path(&mut self) {
-        let path = PathBuf::from(self.path_edit.trim());
-        if path.is_dir() {
-            self.navigate(path);
-        } else {
-            self.path_invalid = true;
-        }
     }
 
     /// Drain worker messages; upload textures for the current generation.
@@ -317,15 +316,27 @@ impl Browser {
         let start_filter = self.filter;
         let start_show_files = self.show_files;
 
-        // Global keys (gated by keyboard focus so typing doesn't navigate).
+        // Global keys (gated by keyboard focus and address-bar edit mode).
         let typing = ctx.wants_keyboard_input();
         let (up_key, enter_key) = ctx.input(|i| {
-            let up = !typing
+            let nav = !typing && !self.is_editing_path;
+            let up = nav
                 && (i.key_pressed(egui::Key::Backspace)
                     || (i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)));
-            let enter = !typing && i.key_pressed(egui::Key::Enter);
+            let enter = nav && i.key_pressed(egui::Key::Enter);
             (up, enter)
         });
+
+        // Ctrl+L focuses the address bar for raw-path editing.
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
+            if !self.is_editing_path {
+                self.temp_path_buffer = self.current.display().to_string();
+            }
+            self.is_editing_path = true;
+            self.path_invalid = false;
+            self.address_focus_pending = true;
+        }
+
         let mut navigate_to: Option<PathBuf> = None;
         let mut select_path: Option<PathBuf> = None;
         let mut text_consumed_enter = false;
@@ -349,42 +360,113 @@ impl Browser {
             .max_size(max)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                // --- Top bar ---
+                // --- Unified address bar (Row 1) ---
                 ui.horizontal(|ui| {
-                    if ui.button(format!("{} Up", icons::ICON_UP)).clicked() {
+                    // Up button (disabled at the root / drive list).
+                    let can_up = self.current.parent().is_some();
+                    let up = ui.add_enabled(can_up, egui::Button::new(icons::ICON_UP));
+                    if up.clicked() {
                         if let Some(parent) = self.current.parent().map(|p| p.to_path_buf()) {
                             navigate_to = Some(parent);
                         }
                     }
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.path_edit)
-                            .desired_width(ui.available_width())
-                            .text_color(if self.path_invalid {
-                                egui::Color32::from_rgb(235, 87, 87)
-                            } else {
-                                colors.primary
-                            }),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.jump_to_path();
-                        text_consumed_enter = true;
-                    }
-                });
 
-                // Breadcrumbs — clean, borderless clickable text.
-                ui.horizontal_wrapped(|ui| {
-                    let crumbs = breadcrumbs(&self.current);
-                    for (i, (label, path)) in crumbs.iter().enumerate() {
-                        if i > 0 {
-                            ui.label(
-                                egui::RichText::new("›").size(13.0).color(colors.muted),
-                            );
-                        }
-                        let text = egui::RichText::new(label).size(13.0);
-                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                            navigate_to = Some(path.clone());
-                        }
-                    }
+                    // Inset address-bar frame (input-like).
+                    let frame_stroke = if self.path_invalid {
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(235, 87, 87))
+                    } else {
+                        egui::Stroke::new(1.0_f32, colors.border)
+                    };
+                    let input_fill = if colors.dark_mode {
+                        egui::Color32::from_black_alpha(60)
+                    } else {
+                        egui::Color32::from_black_alpha(10)
+                    };
+                    egui::Frame::none()
+                        .fill(input_fill)
+                        .stroke(frame_stroke)
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            if self.is_editing_path {
+                                // Raw path edit mode.
+                                let mut output = egui::TextEdit::singleline(
+                                    &mut self.temp_path_buffer,
+                                )
+                                .desired_width(f32::INFINITY)
+                                .text_color(if self.path_invalid {
+                                    egui::Color32::from_rgb(235, 87, 87)
+                                } else {
+                                    colors.primary
+                                })
+                                .show(ui);
+
+                                if self.address_focus_pending {
+                                    output.response.request_focus();
+                                    let len = self.temp_path_buffer.len();
+                                    let range = egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(0),
+                                        egui::text::CCursor::new(len),
+                                    );
+                                    output.state.cursor.set_char_range(Some(range));
+                                    output.state.store(ui.ctx(), output.response.id);
+                                    self.address_focus_pending = false;
+                                }
+
+                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                if enter {
+                                    text_consumed_enter = true;
+                                    let path = normalize_path(&self.temp_path_buffer);
+                                    if path.is_dir() {
+                                        navigate_to = Some(path);
+                                        self.is_editing_path = false;
+                                        self.path_invalid = false;
+                                    } else {
+                                        self.path_invalid = true;
+                                        output.response.request_focus();
+                                    }
+                                } else if esc || output.response.lost_focus() {
+                                    self.is_editing_path = false;
+                                    self.path_invalid = false;
+                                    self.temp_path_buffer = self.current.display().to_string();
+                                }
+                            } else {
+                                // Breadcrumb mode.
+                                let mut enter_edit = false;
+                                ui.horizontal_wrapped(|ui| {
+                                    let crumbs = breadcrumbs(&self.current);
+                                    for (i, (label, path)) in crumbs.iter().enumerate() {
+                                        if i > 0 {
+                                            ui.label(
+                                                egui::RichText::new("›")
+                                                    .size(13.0)
+                                                    .color(colors.muted),
+                                            );
+                                        }
+                                        let text = egui::RichText::new(label).size(13.0);
+                                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                                            navigate_to = Some(path.clone());
+                                        }
+                                    }
+                                    // Empty area to the right → edit mode.
+                                    let empty = ui.allocate_rect(
+                                        ui.available_rect_before_wrap(),
+                                        egui::Sense::click(),
+                                    );
+                                    if empty.clicked() {
+                                        enter_edit = true;
+                                    }
+                                });
+                                if enter_edit {
+                                    self.is_editing_path = true;
+                                    self.temp_path_buffer = self.current.display().to_string();
+                                    self.path_invalid = false;
+                                    self.address_focus_pending = true;
+                                }
+                            }
+                        });
                 });
                 ui.separator();
 
@@ -502,8 +584,50 @@ impl Browser {
                             }
                         }
 
-                        // Placeholder separator for Phase 2 pinned folders.
                         ui.separator();
+
+                        // Pinned Quick Access folders (below the drives list).
+                        if !self.pinned.is_empty() {
+                            ui.label(
+                                egui::RichText::new("PINNED").size(10.0).color(colors.muted),
+                            );
+                            ui.add_space(4.0);
+                            for path in &self.pinned {
+                                let name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.display().to_string());
+                                let text =
+                                    format!("{} {}", icons::ICON_FOLDER, truncate_label(&name, 22));
+                                // Flat button (not a selectable label) so the cursor
+                                // stays a pointing hand instead of a text I-beam.
+                                let resp = ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(text).color(pin_accent()),
+                                        )
+                                        .frame(false)
+                                        .min_size(egui::vec2(ui.available_width(), 20.0)),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = resp.on_hover_text(path.display().to_string());
+                                if resp.clicked() {
+                                    navigate_to = Some(path.clone());
+                                }
+                                resp.context_menu(|ui| {
+                                    if ui
+                                        .button(format!(
+                                            "{} Remove from Quick Access",
+                                            icons::ICON_TRASH
+                                        ))
+                                        .clicked()
+                                    {
+                                        result = BrowserResult::Unpin(path.clone());
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
+                        }
                     });
 
                     // Vertical divider between the sidebar and the content.
@@ -553,24 +677,66 @@ impl Browser {
                 ui.separator();
 
                 // --- Footer ---
-                let selected_display = self
-                    .selected
-                    .clone()
-                    .unwrap_or_else(|| self.current.clone());
+                let (selected_label, full_path) = match &self.selected {
+                    Some(sel) => (
+                        sel.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| sel.display().to_string()),
+                        sel.clone(),
+                    ),
+                    None => {
+                        let name = self
+                            .current
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| self.current.display().to_string());
+                        (format!("{name} (Current Folder)"), self.current.clone())
+                    }
+                };
+                let selected_text = format!("{} Selected: {}", icons::ICON_FOLDER, selected_label);
+                let pin_target = self.selected.clone().unwrap_or_else(|| self.current.clone());
+                let is_pinned = self.pinned.contains(&pin_target);
+                let accent = pin_accent();
+                // Left-to-right: readout anchored far left, buttons far right.
                 ui.horizontal(|ui| {
-                    ui.label("Selected:");
-                    ui.add(
-                        egui::Label::new(selected_display.display().to_string()).truncate(),
-                    )
-                    .on_hover_text(selected_display.display().to_string());
+                    // Far left: bounded readout so long names truncate before
+                    // crowding the right-aligned buttons.
+                    let label_max = (ui.available_width() - 360.0).max(60.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(label_max);
+                        let resp = ui.add(egui::Label::new(selected_text).truncate());
+                        resp.on_hover_text(full_path.display().to_string());
+                    });
+                    // Far right: [Pin] —— [Select Folder] —— [Cancel].
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            result = BrowserResult::Cancel;
+                        }
+                        ui.add_space(8.0);
                         if ui.button("Select Folder").clicked() {
                             result = BrowserResult::Select(
                                 self.selected.clone().unwrap_or_else(|| self.current.clone()),
                             );
                         }
-                        if ui.button("Cancel").clicked() {
-                            result = BrowserResult::Cancel;
+                        ui.add_space(16.0);
+                        if is_pinned {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(format!("{} Pinned", icons::ICON_CHECK)),
+                            );
+                        } else if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} Pin to Quick Access",
+                                        icons::ICON_PIN
+                                    ))
+                                    .color(accent),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            result = BrowserResult::Pin(pin_target.clone());
                         }
                     });
                 });
@@ -1109,6 +1275,37 @@ pub fn resolve_start(remembered: Option<PathBuf>) -> PathBuf {
         return PathBuf::from(d);
     }
     PathBuf::from("C:\\")
+}
+
+/// Warm amber/gold accent shared by the Pin button and the Pinned sidebar
+/// section, so the two read as a linked pair in both Light and Dark themes.
+fn pin_accent() -> egui::Color32 {
+    egui::Color32::from_rgb(224, 168, 44)
+}
+
+/// Truncate a label to at most `max_chars` characters with an ellipsis.
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
+        let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+/// Normalize a user-typed path: strip surrounding whitespace/quotes and
+/// trailing (redundant) slashes, while preserving a drive-root slash (`C:\`).
+fn normalize_path(input: &str) -> PathBuf {
+    let trimmed = input
+        .trim()
+        .trim_matches('"')
+        .trim_end_matches(|c: char| c == '\\' || c == '/');
+    let mut s = trimmed.to_string();
+    if s.len() == 2 && s.ends_with(':') {
+        s.push('\\');
+    }
+    PathBuf::from(s)
 }
 
 fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
