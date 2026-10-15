@@ -33,6 +33,20 @@ Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no
 - **Glassmorphism theme** — translucent frosted panels with configurable opacity, dynamic Light/Dark switching, and Font Awesome 7 Solid iconography.
 - **Persistence** — remembers the exact last-viewed image, its folder, window geometry, and all settings in `%APPDATA%\Photonio\config.json`.
 
+## Supported file types
+
+| Format | Extensions | Notes |
+| --- | --- | --- |
+| JPEG | `.jpg` `.jpeg` `.jfif` | EXIF auto-rotation |
+| PNG | `.png` | |
+| GIF | `.gif` | Animated playback |
+| WebP | `.webp` | Animated playback |
+| BMP | `.bmp` | |
+| TIFF | `.tif` `.tiff` | |
+| ICO | `.ico` | |
+
+Windows Explorer file association is registered for `.jpg`, `.jpeg`, `.jfif`, `.png`, `.webp`, `.bmp`, `.gif`, and `.tiff`.
+
 ## Keyboard shortcuts
 
 | Action | Keys |
