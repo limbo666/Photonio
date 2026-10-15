@@ -132,6 +132,8 @@ pub struct Config {
     pub folder_show_files: bool,
     /// User-pinned Quick Access folders (persisted; sanitized on load).
     pub pinned_folders: Vec<PathBuf>,
+    /// Number of application launches (drives the periodic donation CTA).
+    pub launch_count: u64,
 }
 
 impl Default for Config {
@@ -168,6 +170,7 @@ impl Default for Config {
             folder_content_filter: ContentFilter::Images,
             folder_show_files: true,
             pinned_folders: Vec::new(),
+            launch_count: 0,
         }
     }
 }
@@ -295,5 +298,6 @@ mod tests {
         assert_eq!(decoded.folder_content_filter, ContentFilter::Images);
         assert!(decoded.folder_show_files);
         assert!(decoded.pinned_folders.is_empty());
+        assert_eq!(decoded.launch_count, 0);
     }
 }

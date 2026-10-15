@@ -8,6 +8,8 @@ use eframe::egui::{
     self, Align2, Color32, RichText, Stroke, TextureHandle, Vec2, Window,
 };
 
+use crate::app::DONATION_URL;
+use crate::icons;
 use crate::theme::ThemeColors;
 
 pub struct AboutDialog;
@@ -19,18 +21,21 @@ impl AboutDialog {
         logo_texture: Option<&TextureHandle>,
         glass_alpha: u8,
         dark_mode: bool,
+        is_supporter: bool,
     ) {
         if !*open {
             return;
         }
         let colors = ThemeColors::new(dark_mode, glass_alpha);
+        // Extra vertical room only when the supporter footer is rendered.
+        let height = if is_supporter { 340.0 } else { 380.0 };
 
         Window::new("photonio_about_modal_v2")
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .fixed_size(Vec2::new(340.0, 320.0))
+            .fixed_size(Vec2::new(340.0, height))
             .frame(
                 egui::Frame::none()
                     .fill(colors.panel_fill)
@@ -46,7 +51,7 @@ impl AboutDialog {
             )
             .show(ctx, |ui| {
                 ui.set_width(340.0);
-                ui.set_height(320.0);
+                ui.set_height(height);
                 colors.apply(ui);
 
                 ui.vertical_centered(|ui| {
@@ -91,6 +96,13 @@ impl AboutDialog {
                             .color(colors.primary),
                     );
 
+                    // 4b. Software line.
+                    ui.label(
+                        RichText::new("\"Hand Water Pump\" software")
+                            .size(12.0)
+                            .color(colors.muted),
+                    );
+
                     ui.add_space(4.0);
 
                     // 5. Links — one centered row, two clickable parts.
@@ -123,6 +135,33 @@ impl AboutDialog {
                         .clicked()
                     {
                         *open = false;
+                    }
+
+                    // 8. Supporter footer (hidden for supporters).
+                    if !is_supporter {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        // Darker gold on the light theme so the text stays legible.
+                        let accent = if dark_mode {
+                            Color32::from_rgb(255, 200, 50)
+                        } else {
+                            Color32::from_rgb(178, 118, 10)
+                        };
+                        let link = RichText::new(format!(
+                            "{} Support Photonio on PayPal",
+                            icons::ICON_PAYPAL
+                        ))
+                        .size(12.0)
+                        .color(accent);
+                        if ui
+                            .add(egui::Button::new(link).frame(false))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Help keep Photonio fast, independent, and ad-free")
+                            .clicked()
+                        {
+                            ctx.open_url(egui::OpenUrl::new_tab(DONATION_URL));
+                        }
                     }
                 });
             });

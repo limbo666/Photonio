@@ -26,3 +26,4 @@ pub const ICON_FOLDER: &str = "\u{f07b}"; // folder (folder browser neutral cove
 pub const ICON_HDD: &str = "\u{f0a0}"; // hard-drive (folder browser → drive roots)
 pub const ICON_IMAGE: &str = "\u{f03e}"; // image (folder-open toast image count)
 pub const ICON_PIN: &str = "\u{f08d}"; // thumbtack (pin to Quick Access)
+pub const ICON_PAYPAL: &str = "\u{f1ed}"; // paypal brand (donation CTA)

@@ -20,20 +20,38 @@ const GIF_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 50);
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 170, 40);
 /// Gold accent stroke for the active selection frame (grid + filmstrip).
 const GOLD_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 50);
+/// PayPal donation link (opened in the default browser).
+pub(crate) const DONATION_URL: &str = "https://www.paypal.com/donate/?hosted_button_id=G4LEB66MN2LRU";
 
-/// Register Font Awesome Solid as a fallback font so icon glyphs render
-/// natively and consistently across the UI.
+/// True if `euro.png` or `euro.jpg` sits next to the executable (supporter key).
+/// Checked once at startup and cached — never polled per frame.
+fn is_supporter_check() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|dir| dir.join("euro.png").is_file() || dir.join("euro.jpg").is_file())
+        .unwrap_or(false)
+}
+
+/// Register Font Awesome Solid + Brands as fallback fonts so icon glyphs
+/// (including brand marks like PayPal) render natively across the UI.
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "font_awesome".to_owned(),
         egui::FontData::from_static(include_bytes!("../assets/fonts/fa-solid-900.otf")),
     );
-    fonts
+    // Brand icons (e.g. PayPal `\u{f1ed}`) live in a separate FA font.
+    fonts.font_data.insert(
+        "font_awesome_brands".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/fa-brands-400.otf")),
+    );
+    let proportional = fonts
         .families
         .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .push("font_awesome".to_owned());
+        .or_default();
+    proportional.push("font_awesome".to_owned());
+    proportional.push("font_awesome_brands".to_owned());
     ctx.set_fonts(fonts);
 }
 
@@ -301,6 +319,8 @@ pub struct PhotonioApp {
     last_interaction_instant: std::time::Instant,
     /// The active tab in the two-pane Settings modal (persisted across frames).
     settings_tab: SettingsTab,
+    /// Cached at startup: `euro.png` / `euro.jpg` sits next to the executable.
+    pub is_supporter: bool,
     /// The branded watermark logo texture + dimensions, if decoded.
     logo: Option<(egui::TextureHandle, [usize; 2])>,
     /// Background image decoder + preload channel manager.
@@ -323,7 +343,7 @@ pub struct PhotonioApp {
 impl PhotonioApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        config: config::Config,
+        mut config: config::Config,
         cli_path: Option<PathBuf>,
     ) -> Self {
         apply_global_visuals(
@@ -339,6 +359,12 @@ impl PhotonioApp {
                 .load_texture("photonio-logo", color, egui::TextureOptions::LINEAR);
             (texture, dims)
         });
+
+        // Cache the supporter check once at startup (no per-frame disk I/O).
+        let is_supporter = is_supporter_check();
+        // Bump the launch counter and persist it immediately.
+        config.launch_count += 1;
+        config.save();
 
         let mut app = Self {
             image: None,
@@ -379,6 +405,7 @@ impl PhotonioApp {
             registry_rx: None,
             last_interaction_instant: std::time::Instant::now(),
             settings_tab: SettingsTab::Appearance,
+            is_supporter,
             logo,
             loader: loader::Loader::new(cc.egui_ctx.clone()),
             full_cache: HashMap::new(),
@@ -1731,8 +1758,16 @@ impl PhotonioApp {
                             .size(13.0)
                             .color(version_color),
                     );
+                    // 4. Tagline.
+                    ui.label(
+                        egui::RichText::new(
+                            "A high-performance, lightweight, image viewer for Windows",
+                        )
+                        .size(13.0)
+                        .color(version_color),
+                    );
                     ui.add_space(16.0);
-                    // 4. Guidance hint.
+                    // 5. Guidance hint.
                     ui.label(
                         egui::RichText::new("Drop an image or press Ctrl+O to open")
                             .size(14.0)
@@ -1922,6 +1957,55 @@ impl PhotonioApp {
             });
 
         action
+    }
+
+    /// Floating donation CTA pill docked top-left (mirrors the quick-action pill).
+    fn draw_donation_pill(&mut self, ctx: &egui::Context) {
+        // Periodic schedule: active for 2 runs, hidden for 10, then repeats.
+        let show = !self.is_supporter
+            && self.config.launch_count >= 10
+            && ((self.config.launch_count - 10) % 12) < 2;
+        if !show || self.modal_open() {
+            return;
+        }
+        let Some(opacity) = self.overlay_opacity() else {
+            return;
+        };
+        let colors = self.theme();
+
+        egui::Area::new(egui::Id::new("donation-pill"))
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(16.0, 16.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_opacity(opacity);
+                egui::Frame::none()
+                    .fill(colors.panel_fill)
+                    .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                    .rounding(10.0)
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 4.0),
+                        blur: 18.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(150),
+                    })
+                    .show(ui, |ui| {
+                        colors.apply(ui);
+                        let label = egui::RichText::new(format!(
+                            "{} Support",
+                            icons::ICON_PAYPAL
+                        ))
+                        .color(GOLD_COLOR)
+                        .size(14.0);
+                        if ui
+                            .add(egui::Button::new(label).frame(false))
+                            .on_hover_text("Support Photonio development on PayPal")
+                            .clicked()
+                        {
+                            ctx.open_url(egui::OpenUrl::new_tab(DONATION_URL));
+                        }
+                    });
+            });
     }
 
     /// Render the pill's buttons; returns the clicked action, if any.
@@ -3759,6 +3843,7 @@ impl eframe::App for PhotonioApp {
                 }
 
                 self.draw_filmstrip(ctx);
+                self.draw_donation_pill(ctx);
             }
         }
 
@@ -3841,6 +3926,7 @@ impl eframe::App for PhotonioApp {
             self.logo.as_ref().map(|(texture, _)| texture),
             self.config.glass_opacity,
             about_dark,
+            self.is_supporter,
         );
 
         // Animated GIF playback: advance frames on schedule and keep the
