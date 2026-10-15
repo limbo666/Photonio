@@ -22,8 +22,6 @@ Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no
   <img src="screenshots/screenshot-4.png" alt="Photonio screenshot 4" width="340">
 </p>
 
-A royalty-free demo image is included at [`demo/demo.jpg`](demo/demo.jpg) — drop it onto the window or pass it on the command line to try the viewer immediately.
-
 ## Features
 
 - **Fast, non-blocking loading** — full-res and thumbnail decoders run on separate worker threads, with circular ring preloading and priority scheduling so the active image is always decoded first.
