@@ -21,9 +21,16 @@ pub const ICON_GEAR: &str = "\u{f013}"; // gear (Settings → Behavior)
 pub const ICON_PUZZLE: &str = "\u{f12e}"; // puzzle-piece (Settings → Integration)
 pub const ICON_INFO: &str = "\u{f05a}"; // circle-info (Image Properties)
 pub const ICON_COPY: &str = "\u{f0c5}"; // copy (copy path/folder to clipboard)
+#[allow(dead_code)]
+pub const ICON_ARROW_LEFT: &str = "\u{f060}"; // arrow-left (navigation back)
+#[allow(dead_code)]
+pub const ICON_ARROW_RIGHT: &str = "\u{f061}"; // arrow-right (navigation forward)
 pub const ICON_UP: &str = "\u{f062}"; // arrow-up (folder browser → parent)
 pub const ICON_FOLDER: &str = "\u{f07b}"; // folder (folder browser neutral cover)
 pub const ICON_HDD: &str = "\u{f0a0}"; // hard-drive (folder browser → drive roots)
 pub const ICON_IMAGE: &str = "\u{f03e}"; // image (folder-open toast image count)
 pub const ICON_PIN: &str = "\u{f08d}"; // thumbtack (pin to Quick Access)
+pub const ICON_PLUS: &str = "\u{f067}"; // plus (new folder, add item)
+pub const ICON_XMARK: &str = "\u{f00d}"; // xmark (cancel, dismiss)
 pub const ICON_PAYPAL: &str = "\u{f1ed}"; // paypal brand (donation CTA)
+

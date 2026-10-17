@@ -59,6 +59,24 @@ impl ViewerImage {
         self.texture = ctx.load_texture("photonio-image", color, egui::TextureOptions::LINEAR);
     }
 
+    /// Rotate the displayed image 90° counter-clockwise in place (the `Ctrl+R` hotkey).
+    pub fn rotate_90_ccw(&mut self, ctx: &egui::Context) {
+        let Some(img) = image::RgbaImage::from_raw(
+            self.display[0] as u32,
+            self.display[1] as u32,
+            std::mem::take(&mut self.rgba),
+        ) else {
+            return;
+        };
+        let rotated = image::imageops::rotate270(&img);
+        self.display = [rotated.width() as usize, rotated.height() as usize];
+        self.rgba = rotated.into_raw();
+        self.dimensions = [self.dimensions[1], self.dimensions[0]];
+
+        let color = egui::ColorImage::from_rgba_unmultiplied(self.display, &self.rgba);
+        self.texture = ctx.load_texture("photonio-image", color, egui::TextureOptions::LINEAR);
+    }
+
     /// Raw RGBA8 pixel bytes, used by the "Copy Image" clipboard action.
     pub fn rgba_bytes(&self) -> Vec<u8> {
         self.rgba.clone()
@@ -158,6 +176,12 @@ pub(crate) fn embedded_thumbnail(bytes: &[u8], max_side: u32) -> Option<DynamicI
         .unwrap_or(1);
     let thumb_bytes = extract_thumbnail(&exif)?;
     let img = image::load_from_memory(&thumb_bytes).ok()?;
+    // Reject tiny embedded thumbnails if a high-res preview was requested (> 384)
+    // or if the embedded thumbnail is too small (< 120px) even for small previews,
+    // so caller falls back to decoding the actual image with high sharpness.
+    if max_side > 384 || img.width() < 120 || img.height() < 120 {
+        return None;
+    }
     Some(apply_orientation(img.thumbnail(max_side, max_side), orientation))
 }
 

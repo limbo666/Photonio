@@ -20,9 +20,24 @@ pub fn open_with(path: &Path) {
 
 /// Open the Windows Settings → Apps → Default apps page.
 pub fn open_default_apps_settings() {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", "ms-settings:defaultapps"])
-        .spawn();
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let target: Vec<u16> = "ms-settings:defaultapps"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
 }
 
 /// Open `dir` (a directory) in a new Explorer window.

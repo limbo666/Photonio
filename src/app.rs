@@ -14,14 +14,35 @@ use crate::{about, assets, config, filesystem, icons, loader, platform, theme, v
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 87, 87);
 /// Color used for success feedback in the HUD.
 const SUCCESS_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 220, 150);
-/// Badge color for the active-GIF indicator in the HUD.
-const GIF_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 50);
 /// Amber warning color for registry path-mismatch notices.
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 170, 40);
-/// Gold accent stroke for the active selection frame (grid + filmstrip).
-const GOLD_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 50);
 /// PayPal donation link (opened in the default browser).
 pub(crate) const DONATION_URL: &str = "https://www.paypal.com/donate/?hosted_button_id=G4LEB66MN2LRU";
+
+/// Seconds for the status pill feedback badge to fade in.
+pub(crate) const FEEDBACK_FADE_IN_SECS: f32 = 0.2;
+/// Seconds for the status pill feedback badge to hold full visibility.
+pub(crate) const FEEDBACK_HOLD_SECS: f32 = 2.5;
+/// Seconds for the status pill feedback badge to fade out.
+pub(crate) const FEEDBACK_FADE_OUT_SECS: f32 = 0.5;
+/// Total lifespan of a transient status pill feedback badge before auto-clearance.
+pub(crate) const FEEDBACK_TOTAL_SECS: f32 = FEEDBACK_HOLD_SECS + FEEDBACK_FADE_OUT_SECS;
+
+/// Compute the opacity `(0.0..=1.0)` of a transient feedback pill given the elapsed seconds.
+/// Returns `None` once the badge has completed its full lifecycle and should be cleared.
+pub(crate) fn compute_feedback_alpha(elapsed: f32) -> Option<f32> {
+    if elapsed >= FEEDBACK_TOTAL_SECS {
+        return None;
+    }
+    let alpha = if elapsed < FEEDBACK_FADE_IN_SECS {
+        (elapsed / FEEDBACK_FADE_IN_SECS).clamp(0.0, 1.0)
+    } else if elapsed <= FEEDBACK_HOLD_SECS {
+        1.0
+    } else {
+        ((FEEDBACK_TOTAL_SECS - elapsed) / FEEDBACK_FADE_OUT_SECS).clamp(0.0, 1.0)
+    };
+    Some(alpha)
+}
 
 /// True if `euro.png` or `euro.jpg` sits next to the executable (supporter key).
 /// Checked once at startup and cached — never polled per frame.
@@ -56,25 +77,77 @@ fn setup_fonts(ctx: &egui::Context) {
 }
 
 /// Set the global egui widget visuals to match the backdrop theme, so
+/// Global egui visual tweaks applied at startup and when theme switches so that
 /// checkboxes, radio buttons, separators, and buttons follow Light/Dark mode.
 fn apply_global_visuals(ctx: &egui::Context, dark_mode: bool) {
     if dark_mode {
-        ctx.set_visuals(egui::Visuals::dark());
+        let mut visuals = egui::Visuals::dark();
+        // Selected button / item background & border:
+        // A luminous amber-gold glass tint.
+        visuals.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(255, 200, 50, 45);
+        // In egui, selection.stroke defines the text stroke for selected items.
+        // Crisp white-ish text provides maximum contrast (>11:1) over dark glass.
+        visuals.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(250));
+
+        // When selected/active:
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgba_unmultiplied(255, 200, 50, 65);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 200, 50));
+        visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+        visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+        visuals.widgets.active.expansion = 0.0_f32;
+
+        // Hovered widgets:
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_white_alpha(30);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70));
+        visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+        visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+
+        // Inactive widgets:
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_white_alpha(10);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(25));
+        visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(185);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+
+        ctx.set_visuals(visuals);
         return;
     }
+
     let mut visuals = egui::Visuals::light();
     visuals.widgets.noninteractive.bg_stroke =
         egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(30));
+
+    // Inactive widgets:
     visuals.widgets.inactive.bg_fill =
         egui::Color32::from_rgba_premultiplied(230, 233, 238, 200);
     visuals.widgets.inactive.bg_stroke =
         egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40));
+    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(40);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+
+    // Hovered widgets:
     visuals.widgets.hovered.bg_fill =
         egui::Color32::from_rgba_premultiplied(214, 218, 226, 200);
-    visuals.widgets.active.bg_fill =
-        egui::Color32::from_rgba_premultiplied(198, 204, 214, 220);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(255, 200, 50);
-    visuals.selection.stroke = egui::Stroke::new(2.0_f32, egui::Color32::from_gray(30));
+    visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(70));
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::BLACK;
+    visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+
+    // Selected button / item background & border on Light mode:
+    // Rich deep amber fill with clean amber stroke.
+    visuals.selection.bg_fill = egui::Color32::from_rgb(178, 118, 10);
+    // In egui, selection.stroke defines the text stroke for selected widgets.
+    // Crisp white text provides strong contrast (4.8:1 WCAG AA) against the amber fill.
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+
+    // When widgets are active (pressed) in light mode:
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(178, 118, 10);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(148, 98, 8));
+    // strong_text_color() derives from widgets.active.fg_stroke.color. Keep it dark charcoal
+    // so bold headers and labels (e.g. in Settings cards) are dark and legible, not washed out white!
+    visuals.widgets.active.fg_stroke.color = egui::Color32::from_gray(25);
+    visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.active.expansion = 0.0_f32;
+
     ctx.set_visuals(visuals);
 }
 
@@ -97,6 +170,7 @@ struct InputSnapshot {
     reset_fit: bool,
     reset_100: bool,
     rotate: bool,
+    rotate_ccw: bool,
     open_file: bool,
     open_folder: bool,
     copy_path: bool,
@@ -113,10 +187,13 @@ struct InputSnapshot {
     toggle_play: bool,
     step_back: bool,
     step_forward: bool,
+    save: bool,
     save_as: bool,
     print: bool,
     toggle_image_info: bool,
     resize_image: bool,
+    refresh_folder: bool,
+    rename: bool,
 }
 
 /// An action selected from the quick-action pill.
@@ -124,6 +201,7 @@ enum PillAction {
     OpenFile,
     OpenFolder,
     SaveAs,
+    SaveRotation,
     Print,
     ToggleFilmstrip,
 }
@@ -153,12 +231,172 @@ enum GridTileAction {
     ContextMenu(usize, egui::Pos2),
 }
 
+/// A subfolder displayed in the MultiView grid.
+#[derive(Clone, Debug)]
+pub struct MultiViewSubfolder {
+    pub path: PathBuf,
+    pub name: String,
+    pub preview_paths: Vec<PathBuf>,
+}
+
+enum SubfolderWorkerMsg {
+    Folders {
+        gen: u64,
+        folders: Vec<MultiViewSubfolder>,
+    },
+    Thumb {
+        gen: u64,
+        path: PathBuf,
+        rgba: Vec<u8>,
+        dims: [usize; 2],
+    },
+}
+
+enum GridFolderAction {
+    Select(usize),
+    Open(usize),
+    ContextMenu(usize, egui::Pos2),
+}
+
+/// A segment in the interactive breadcrumbs path bar.
+#[derive(Debug, Clone, PartialEq)]
+enum BreadcrumbSegment {
+    /// A single navigable folder button.
+    Crumb {
+        label: String,
+        path: PathBuf,
+        is_current: bool,
+    },
+    /// Intermediate folders collapsed into a button ("...") to fit within available width.
+    Ellipsis {
+        hidden: Vec<(String, PathBuf)>,
+    },
+}
+
+/// Compute the breadcrumb segments to render inside the available address bar width.
+/// When the path exceeds the width, intermediate folders collapse into an Ellipsis segment ("..."),
+/// preserving the root (drive) and the active folder as interactive buttons.
+fn layout_breadcrumbs(
+    crumbs: &[(String, PathBuf)],
+    available_width: f32,
+    measure_text_width: impl Fn(&str, bool) -> f32,
+) -> Vec<BreadcrumbSegment> {
+    if crumbs.is_empty() {
+        return Vec::new();
+    }
+
+    let n = crumbs.len();
+    let btn_pad = 8.0_f32; // 4.0 left + 4.0 right button padding
+    let sep_w = measure_text_width("›", false) + 4.0;
+    let ellipsis_w = measure_text_width("...", false) + btn_pad;
+
+    let crumb_widths: Vec<f32> = crumbs
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| {
+            let is_last = i == n - 1;
+            measure_text_width(label, is_last) + btn_pad
+        })
+        .collect();
+
+    let total_uncollapsed: f32 = crumb_widths.iter().sum::<f32>()
+        + if n > 1 { (n - 1) as f32 * sep_w } else { 0.0 };
+
+    if total_uncollapsed <= available_width || n <= 2 {
+        if total_uncollapsed <= available_width || n <= 1 {
+            return crumbs
+                .iter()
+                .enumerate()
+                .map(|(i, (label, path))| BreadcrumbSegment::Crumb {
+                    label: label.clone(),
+                    path: path.clone(),
+                    is_current: i == n - 1,
+                })
+                .collect();
+        }
+    }
+
+    // Try keeping crumbs[0] (root), an Ellipsis for intermediate crumbs (1..k),
+    // and as many trailing crumbs (k..n) as possible, always including crumbs[n-1].
+    let mut best_k = None;
+    for k in 2..n {
+        let trailing_w: f32 = crumb_widths[k..n].iter().sum::<f32>()
+            + (n - k) as f32 * sep_w;
+        let candidate_w = crumb_widths[0] + sep_w + ellipsis_w + trailing_w;
+        if candidate_w <= available_width {
+            best_k = Some(k);
+            break;
+        }
+    }
+
+    if let Some(k) = best_k {
+        let mut segments = Vec::new();
+        segments.push(BreadcrumbSegment::Crumb {
+            label: crumbs[0].0.clone(),
+            path: crumbs[0].1.clone(),
+            is_current: false,
+        });
+        segments.push(BreadcrumbSegment::Ellipsis {
+            hidden: crumbs[1..k].to_vec(),
+        });
+        for i in k..n {
+            segments.push(BreadcrumbSegment::Crumb {
+                label: crumbs[i].0.clone(),
+                path: crumbs[i].1.clone(),
+                is_current: i == n - 1,
+            });
+        }
+        return segments;
+    }
+
+    // If even root + ... + current does not fit, collapse root as well: ... + current
+    let last_w = crumb_widths[n - 1];
+    let candidate_no_root = ellipsis_w + sep_w + last_w;
+    if candidate_no_root <= available_width {
+        return vec![
+            BreadcrumbSegment::Ellipsis {
+                hidden: crumbs[0..n - 1].to_vec(),
+            },
+            BreadcrumbSegment::Crumb {
+                label: crumbs[n - 1].0.clone(),
+                path: crumbs[n - 1].1.clone(),
+                is_current: true,
+            },
+        ];
+    }
+
+    // If even that exceeds available width, truncate the current folder's label
+    let avail_for_last = (available_width - ellipsis_w - sep_w).max(10.0);
+    let original_label = &crumbs[n - 1].0;
+    let avg_char_w = (last_w / original_label.chars().count().max(1) as f32).max(6.0);
+    let max_chars = ((avail_for_last - btn_pad) / avg_char_w).floor().max(3.0) as usize;
+    let truncated_label = truncate(original_label, max_chars);
+
+    vec![
+        BreadcrumbSegment::Ellipsis {
+            hidden: crumbs[0..n - 1].to_vec(),
+        },
+        BreadcrumbSegment::Crumb {
+            label: truncated_label,
+            path: crumbs[n - 1].1.clone(),
+            is_current: true,
+        },
+    ]
+}
+
 /// A folder-browser operation awaiting the user's "Select Folder" confirmation.
 #[derive(Clone, Copy)]
 enum PendingOperation {
     OpenFolder,
     CopyFileTo,
     MoveFileTo,
+}
+
+/// State for the file rename modal dialog.
+struct RenameState {
+    old_path: PathBuf,
+    new_name: String,
+    focus_pending: bool,
 }
 
 /// An action selected from the context menu.
@@ -169,6 +407,7 @@ enum MenuAction {
     CloseFolder,
     ResizeImage,
     SaveRotation,
+    SaveAs,
     OpenContainingFolder,
     OpenWith,
     CopyFileTo,
@@ -176,6 +415,7 @@ enum MenuAction {
     CopyFile,
     CopyImage,
     CopyPath,
+    Rename,
     SetWallpaper,
     Delete,
     Settings,
@@ -190,6 +430,7 @@ enum MenuAction {
 struct Thumb {
     texture: egui::TextureHandle,
     dims: [usize; 2],
+    lod: loader::PreviewLod,
 }
 
 /// Playback state for a multi-frame animation (GIF or WebP). Each frame is a
@@ -296,12 +537,26 @@ pub struct PhotonioApp {
     show_settings: bool,
     show_image_info: bool,
     show_resize_dialog: bool,
+    /// Rename modal state (present while the dialog is open).
+    rename_state: Option<RenameState>,
     /// The custom folder browser is open.
     show_folder_browser: bool,
     /// What the folder browser should do when "Select Folder" is clicked.
     pending_operation: Option<PendingOperation>,
     /// Folder browser state (present while the browser is open).
     folder_browser: Option<viewer::folder_browser::Browser>,
+    /// Whether the grid view path bar is currently in raw text edit mode.
+    grid_path_editing: bool,
+    /// Text buffer for editing the folder path in grid view.
+    grid_path_buffer: String,
+    /// Focus request flag for the grid path edit field.
+    grid_path_focus_pending: bool,
+    /// Whether the user-typed path in grid view failed directory validation.
+    grid_path_invalid: bool,
+    /// History stack of previously visited folders for the Back button.
+    folder_back_stack: Vec<PathBuf>,
+    /// History stack of folders for the Forward button.
+    folder_forward_stack: Vec<PathBuf>,
     /// Set when help just opened, to ignore the same-frame click.
     help_opened_this_frame: bool,
     /// Transient feedback badge: (message, when shown).
@@ -332,8 +587,8 @@ pub struct PhotonioApp {
     full_cache: HashMap<usize, (Vec<u8>, [usize; 2], [usize; 2])>,
     /// Indices with a full decode currently in flight (dedup).
     pending_full: HashSet<usize>,
-    /// Indices with a thumbnail decode currently in flight (dedup + retry).
-    pending_thumb: HashSet<usize>,
+    /// Indices with a thumbnail decode currently in flight (dedup + retry by LOD).
+    pending_thumb: HashMap<usize, loader::PreviewLod>,
     /// Indices whose thumbnail decode definitively failed (shown as a
     /// placeholder; never retried until the folder changes).
     failed_thumb: HashSet<usize>,
@@ -341,6 +596,26 @@ pub struct PhotonioApp {
     loading_index: Option<usize>,
     /// Cached thumbnails by file index.
     thumb_cache: HashMap<usize, Thumb>,
+    /// Receiver for asynchronous background folder rescanning: (scanned_dir, new_files, is_manual).
+    refresh_rx: Option<std::sync::mpsc::Receiver<(PathBuf, Vec<PathBuf>, bool)>>,
+    /// True while a background folder rescan thread is running.
+    is_refreshing: bool,
+    /// Currently hovered grid item index (used to anchor zoom around the pointer target).
+    grid_hovered_index: Option<usize>,
+    /// Last measured grid content area available width.
+    grid_available_width: f32,
+    /// Item spacing in the grid.
+    grid_spacing_y: f32,
+    /// Subfolders contained within the active directory for MultiView.
+    multiview_subfolders: Vec<MultiViewSubfolder>,
+    /// Decoded GPU textures for subfolder quad previews, keyed by image path.
+    multiview_folder_textures: HashMap<PathBuf, egui::TextureHandle>,
+    /// Generation counter for async subfolder scans (session dedup).
+    multiview_folder_gen: u64,
+    /// Receiver for async subfolder and quad thumbnail worker messages.
+    multiview_folder_rx: Option<std::sync::mpsc::Receiver<SubfolderWorkerMsg>>,
+    /// Currently selected subfolder index in the MultiView grid, if any.
+    grid_selected_folder: Option<usize>,
 }
 
 impl PhotonioApp {
@@ -354,6 +629,13 @@ impl PhotonioApp {
             config.canvas_background != config::CanvasBackground::Light,
         );
         setup_fonts(&cc.egui_ctx);
+
+        // Disable egui's default keyboard-triggered whole-page zoom (Ctrl+±/0)
+        // so hotkeys target image containers and content rather than scaling the entire UI.
+        cc.egui_ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+        });
+        cc.egui_ctx.set_zoom_factor(1.0);
 
         // Load the embedded logo once for the empty-state watermark + About.
         let logo = assets::logo_color_image().map(|(color, dims)| {
@@ -397,9 +679,16 @@ impl PhotonioApp {
             show_settings: false,
             show_image_info: false,
             show_resize_dialog: false,
+            rename_state: None,
             show_folder_browser: false,
             pending_operation: None,
             folder_browser: None,
+            grid_path_editing: false,
+            grid_path_buffer: String::new(),
+            grid_path_focus_pending: false,
+            grid_path_invalid: false,
+            folder_back_stack: Vec::new(),
+            folder_forward_stack: Vec::new(),
             help_opened_this_frame: false,
             feedback: None,
             empty_folder_since: None,
@@ -414,10 +703,20 @@ impl PhotonioApp {
             loader: loader::Loader::new(cc.egui_ctx.clone()),
             full_cache: HashMap::new(),
             pending_full: HashSet::new(),
-            pending_thumb: HashSet::new(),
+            pending_thumb: HashMap::new(),
             failed_thumb: HashSet::new(),
             loading_index: None,
             thumb_cache: HashMap::new(),
+            refresh_rx: None,
+            is_refreshing: false,
+            grid_hovered_index: None,
+            grid_available_width: 1000.0,
+            grid_spacing_y: 6.0,
+            multiview_subfolders: Vec::new(),
+            multiview_folder_textures: HashMap::new(),
+            multiview_folder_gen: 0,
+            multiview_folder_rx: None,
+            grid_selected_folder: None,
         };
 
         if let Some(path) = cli_path {
@@ -438,6 +737,10 @@ impl PhotonioApp {
             } else if let Some(dir) = app.config.last_directory.clone().filter(|p| p.is_dir()) {
                 app.open_directory(dir, &cc.egui_ctx);
             }
+        }
+
+        if app.current_folder().is_some() {
+            app.refresh_multiview_subfolders(&cc.egui_ctx);
         }
 
         app
@@ -558,18 +861,26 @@ impl PhotonioApp {
         self.request_thumbs(index);
     }
 
-    /// Best-effort thumbnail request for one index, deduped against the cache
-    /// and in-flight set. Dropped requests are retried on later frames.
-    fn request_thumb_for(&mut self, index: usize) {
-        if self.thumb_cache.contains_key(&index)
-            || self.pending_thumb.contains(&index)
-            || self.failed_thumb.contains(&index)
-        {
+    /// Best-effort thumbnail request for one index at the specified LOD, deduped
+    /// against the cache and in-flight set. Upgrades existing lower-res thumbnails
+    /// seamlessly when higher zoom levels are viewed.
+    fn request_thumb_for(&mut self, index: usize, needed_lod: loader::PreviewLod) {
+        if self.failed_thumb.contains(&index) {
             return;
         }
+        if let Some(existing) = self.thumb_cache.get(&index) {
+            if existing.lod >= needed_lod {
+                return;
+            }
+        }
+        if let Some(&pending) = self.pending_thumb.get(&index) {
+            if pending >= needed_lod {
+                return;
+            }
+        }
         if let Some(path) = self.files.get(index).cloned() {
-            if self.loader.request_thumb(index, path) {
-                self.pending_thumb.insert(index);
+            if self.loader.request_thumb(index, path, needed_lod) {
+                self.pending_thumb.insert(index, needed_lod);
             }
         }
     }
@@ -590,7 +901,7 @@ impl PhotonioApp {
             (0..len).collect()
         };
         for i in window {
-            self.request_thumb_for(i);
+            self.request_thumb_for(i, loader::PreviewLod::Small);
         }
     }
 
@@ -660,26 +971,162 @@ impl PhotonioApp {
                     // the image currently being viewed.
                     self.pending_full.remove(&index);
                 }
-                loader::ResponseKind::Thumb { index, rgba, dims } => {
-                    self.pending_thumb.remove(&index);
-                    let color = egui::ColorImage::from_rgba_unmultiplied(dims, &rgba);
-                    let tex = ctx.load_texture(
-                        format!("thumb-{index}"),
-                        color,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.thumb_cache.insert(index, Thumb { texture: tex, dims });
+                loader::ResponseKind::Thumb { index, rgba, dims, lod } => {
+                    if self.pending_thumb.get(&index) == Some(&lod) {
+                        self.pending_thumb.remove(&index);
+                    }
+                    let should_insert = match self.thumb_cache.get(&index) {
+                        Some(existing) => lod >= existing.lod,
+                        None => true,
+                    };
+                    if should_insert {
+                        let color = egui::ColorImage::from_rgba_unmultiplied(dims, &rgba);
+                        let tex = ctx.load_texture(
+                            format!("thumb-{index}-{lod:?}"),
+                            color,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.thumb_cache.insert(index, Thumb { texture: tex, dims, lod });
+                    }
                     // If this is the image we're still waiting on, show it now.
                     if self.loading_index == Some(index) && index == self.current_index {
                         self.set_preview(index);
                     }
                 }
-                loader::ResponseKind::ThumbFailed { index } => {
-                    self.pending_thumb.remove(&index);
-                    self.failed_thumb.insert(index);
+                loader::ResponseKind::ThumbFailed { index, lod } => {
+                    if self.pending_thumb.get(&index) == Some(&lod) {
+                        self.pending_thumb.remove(&index);
+                    }
+                    if !self.thumb_cache.contains_key(&index) {
+                        self.failed_thumb.insert(index);
+                    }
                 }
             }
         }
+    }
+
+    /// Drain worker messages for MultiView subfolders and quad thumbnail previews.
+    fn poll_subfolders(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.multiview_folder_rx else { return };
+        let mut had_updates = false;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                SubfolderWorkerMsg::Folders { gen, folders } => {
+                    if gen == self.multiview_folder_gen {
+                        self.multiview_subfolders = folders;
+                        had_updates = true;
+                    }
+                }
+                SubfolderWorkerMsg::Thumb { gen, path, rgba, dims } => {
+                    if gen == self.multiview_folder_gen {
+                        let color = egui::ColorImage::from_rgba_unmultiplied(dims, &rgba);
+                        let tex = ctx.load_texture(
+                            format!("mv-folder-{}", path.display()),
+                            color,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.multiview_folder_textures.insert(path, tex);
+                        had_updates = true;
+                    }
+                }
+            }
+        }
+        if had_updates {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Asynchronously scan the active directory for direct subfolders and up to 4 preview images each,
+    /// and asynchronously decode their quad thumbnails.
+    fn refresh_multiview_subfolders(&mut self, ctx: &egui::Context) {
+        self.multiview_folder_gen += 1;
+        let gen = self.multiview_folder_gen;
+        self.multiview_subfolders.clear();
+        self.multiview_folder_textures.clear();
+        self.grid_selected_folder = None;
+
+        if !self.config.multiview_show_folders {
+            self.multiview_folder_rx = None;
+            return;
+        }
+
+        let Some(dir) = self.current_folder() else {
+            self.multiview_folder_rx = None;
+            return;
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.multiview_folder_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let mut subfolders = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    if let Ok(meta) = entry.metadata() {
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::fs::MetadataExt;
+                            const HIDDEN: u32 = 0x2;
+                            const SYSTEM: u32 = 0x4;
+                            if meta.file_attributes() & (HIDDEN | SYSTEM) != 0 {
+                                continue;
+                            }
+                        }
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+
+                    // Hunt for up to 4 supported image files in this subfolder
+                    let mut preview_paths = Vec::new();
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for (i, sub_entry) in sub_entries.flatten().enumerate() {
+                            if i >= 60 {
+                                break;
+                            }
+                            let sub_path = sub_entry.path();
+                            if sub_path.is_file() && filesystem::is_supported_path(&sub_path) {
+                                preview_paths.push(sub_path);
+                                if preview_paths.len() >= 4 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    subfolders.push(MultiViewSubfolder {
+                        path,
+                        name,
+                        preview_paths,
+                    });
+                }
+            }
+
+            subfolders.sort_by(|a, b| natord::compare(&a.name, &b.name));
+
+            // Send folder listing immediately so UI can display folder cards instantly
+            if tx.send(SubfolderWorkerMsg::Folders { gen, folders: subfolders.clone() }).is_err() {
+                return;
+            }
+
+            // Decode thumbnails for quad previews
+            for folder in &subfolders {
+                for img_path in &folder.preview_paths {
+                    if let Some((rgba, dims)) = decode_quad_thumb(img_path, 160) {
+                        if tx.send(SubfolderWorkerMsg::Thumb { gen, path: img_path.clone(), rgba, dims }).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        ctx.request_repaint();
     }
 
     /// Clear all decode caches (used when the file list changes).
@@ -694,6 +1141,11 @@ impl PhotonioApp {
         self.loading_index = None;
         self.preview = None;
         self.animation = None;
+        self.multiview_folder_gen += 1;
+        self.multiview_subfolders.clear();
+        self.multiview_folder_textures.clear();
+        self.multiview_folder_rx = None;
+        self.grid_selected_folder = None;
     }
 
     /// Evict cache entries far from the current index to bound memory.
@@ -739,14 +1191,192 @@ impl PhotonioApp {
 
     /// Leave the grid selector and display the currently highlighted image.
     fn leave_grid(&mut self, ctx: &egui::Context) {
+        self.grid_path_editing = false;
+        self.grid_path_invalid = false;
         self.view_mode = ViewMode::Viewer;
         if !self.files.is_empty() {
             self.navigate_to(self.current_index, ctx);
         }
+        self.trigger_folder_refresh(ctx, false);
     }
 
     fn current_file(&self) -> Option<&PathBuf> {
         self.files.get(self.current_index)
+    }
+
+    fn current_folder(&self) -> Option<PathBuf> {
+        self.files
+            .first()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| self.config.last_directory.clone())
+            .filter(|p| p.is_dir())
+    }
+
+    /// Asynchronously initiate a background folder scan and reconcile changes
+    /// without disrupting the active view, viewport zoom/pan, or existing GPU thumbnail caches.
+    fn trigger_folder_refresh(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.is_refreshing {
+            return;
+        }
+        let Some(dir) = self.current_folder() else {
+            return;
+        };
+        self.is_refreshing = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.refresh_rx = Some(rx);
+        let dir_clone = dir.clone();
+        let worker_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let files = filesystem::scan_directory(&dir_clone);
+            let _ = tx.send((dir_clone, files, manual));
+            worker_ctx.request_repaint();
+        });
+    }
+
+    /// Trigger a manual folder refresh (e.g. from F5 key).
+    fn trigger_manual_refresh(&mut self, ctx: &egui::Context) {
+        self.trigger_folder_refresh(ctx, true);
+    }
+
+    /// Drain a finished background folder scan and apply the reconciliation.
+    fn poll_refresh(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.refresh_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((dir, new_files, manual)) => {
+                self.is_refreshing = false;
+                self.refresh_rx = None;
+                if self.current_folder().as_ref() == Some(&dir) {
+                    self.apply_folder_refresh(new_files, manual, ctx);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.is_refreshing = false;
+                self.refresh_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Reconcile cached decoded RGBA buffers and GPU thumbnail textures from `old_files`
+    /// to their new indices in `self.files` by matching canonical paths.
+    fn reconcile_caches(&mut self, old_files: &[PathBuf]) {
+        self.loader.bump_generation();
+
+        self.full_cache = remap_cache_keys(&mut self.full_cache, old_files, &self.files);
+        self.thumb_cache = remap_cache_keys(&mut self.thumb_cache, old_files, &self.files);
+        self.pending_full.clear();
+        self.pending_thumb.clear();
+        self.failed_thumb.clear();
+    }
+
+    /// Reconcile cached decoded RGBA buffers and GPU thumbnail textures with an optional
+    /// explicitly renamed item pair `(old_idx, new_idx)`.
+    fn reconcile_caches_with_rename(
+        &mut self,
+        old_files: &[PathBuf],
+        renamed: Option<(usize, usize)>,
+    ) {
+        if let Some(r) = renamed {
+            self.loader.bump_generation();
+            self.full_cache = remap_cache_keys_with_rename(
+                &mut self.full_cache,
+                old_files,
+                &self.files,
+                Some(r),
+            );
+            self.thumb_cache = remap_cache_keys_with_rename(
+                &mut self.thumb_cache,
+                old_files,
+                &self.files,
+                Some(r),
+            );
+            self.pending_full.clear();
+            self.pending_thumb.clear();
+            self.failed_thumb.clear();
+        } else {
+            self.reconcile_caches(old_files);
+        }
+    }
+
+    /// Apply the newly scanned directory files non-disruptively.
+    fn apply_folder_refresh(
+        &mut self,
+        new_files: Vec<PathBuf>,
+        manual: bool,
+        ctx: &egui::Context,
+    ) {
+        let changed = new_files != self.files;
+        if !changed {
+            if manual {
+                // Invalidate active image's caches so in-place edits reload
+                if !self.files.is_empty() {
+                    self.full_cache.remove(&self.current_index);
+                    self.thumb_cache.remove(&self.current_index);
+                    self.navigate_to(self.current_index, ctx);
+                }
+                self.show_success("Folder up to date");
+            }
+            return;
+        }
+
+        let old_files = std::mem::replace(&mut self.files, new_files);
+        let active_path = old_files.get(self.current_index).cloned();
+
+        self.reconcile_caches(&old_files);
+
+        if self.files.is_empty() {
+            self.image = None;
+            self.preview = None;
+            self.animation = None;
+            self.current_index = 0;
+            self.config.last_file_path = None;
+            self.empty_folder_since = Some(std::time::Instant::now());
+            self.reset_viewport();
+            if manual {
+                self.show_success("Folder is empty");
+            }
+            return;
+        }
+
+        if let Some(path) = &active_path {
+            if let Some(new_idx) = self.files.iter().position(|p| p == path) {
+                // Active image still exists in the folder: preserve its canvas/zoom/pan/rotation!
+                self.current_index = new_idx;
+                self.loader.set_current_index(new_idx);
+                self.config.last_file_path = Some(path.clone());
+            } else {
+                // Active image was deleted/moved outside: advance to nearest neighbor
+                let next_idx = self.current_index.min(self.files.len() - 1);
+                self.navigate_to(next_idx, ctx);
+            }
+        } else {
+            // Folder previously empty, now has images: open first image
+            self.empty_folder_since = None;
+            self.navigate_to(0, ctx);
+        }
+
+        if manual {
+            self.show_success(format!("Folder refreshed ({} images)", self.files.len()));
+        }
+
+        ctx.request_repaint();
+    }
+
+    /// Push current folder to history stack before switching to `dir`.
+    fn push_folder_history(&mut self, dir: &Path) {
+        if let Some(cur) = self.current_folder() {
+            if cur != dir {
+                if self.folder_back_stack.last().map(|p| p.as_path()) != Some(&cur) {
+                    self.folder_back_stack.push(cur);
+                    if self.folder_back_stack.len() > 50 {
+                        self.folder_back_stack.remove(0);
+                    }
+                }
+                self.folder_forward_stack.clear();
+            }
+        }
     }
 
     fn open_file(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -762,9 +1392,14 @@ impl PhotonioApp {
         self.empty_folder_since = None;
         match path.parent() {
             Some(dir) => {
+                self.push_folder_history(dir);
                 self.config.last_directory = Some(dir.to_path_buf());
                 self.save_config();
                 self.files = filesystem::scan_directory(dir);
+                self.grid_path_buffer = dir.display().to_string();
+                self.grid_path_editing = false;
+                self.grid_path_invalid = false;
+                self.refresh_multiview_subfolders(ctx);
                 let index = self.files.iter().position(|p| *p == path).unwrap_or(0);
                 self.navigate_to(index, ctx);
             }
@@ -775,12 +1410,24 @@ impl PhotonioApp {
         }
     }
 
+    /// Open `dir` as the active folder, recording history for Back/Forward navigation.
     fn open_directory(&mut self, dir: PathBuf, ctx: &egui::Context) {
+        self.push_folder_history(&dir);
+        self.open_directory_internal(dir, ctx);
+    }
+
+    /// Low-level folder opening without mutating the back/forward history stacks.
+    fn open_directory_internal(&mut self, dir: PathBuf, ctx: &egui::Context) {
         self.config.last_directory = Some(dir.clone());
         self.save_config();
 
         self.clear_caches();
         self.files = filesystem::scan_directory(&dir);
+        self.scroll_to_selected = true;
+        self.grid_path_buffer = dir.display().to_string();
+        self.grid_path_editing = false;
+        self.grid_path_invalid = false;
+        self.refresh_multiview_subfolders(ctx);
         if self.files.is_empty() {
             self.image = None;
             self.error = None;
@@ -793,6 +1440,68 @@ impl PhotonioApp {
             self.current_index = 0;
             self.navigate_to(0, ctx);
         }
+    }
+
+    /// Navigate back to the previous folder in history.
+    fn navigate_folder_back(&mut self, ctx: &egui::Context) -> bool {
+        while let Some(prev) = self.folder_back_stack.pop() {
+            if prev.is_dir() {
+                if let Some(cur) = self.current_folder() {
+                    if self.folder_forward_stack.last().map(|p| p.as_path()) != Some(&cur) {
+                        self.folder_forward_stack.push(cur);
+                        if self.folder_forward_stack.len() > 50 {
+                            self.folder_forward_stack.remove(0);
+                        }
+                    }
+                }
+                let name = prev
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| prev.display().to_string());
+                self.open_directory_internal(prev, ctx);
+                let count = self.files.len();
+                self.show_success(format!(
+                    "{} Back to \"{}\" ({} image{})",
+                    icons::ICON_IMAGE,
+                    name,
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Navigate forward to the next folder in history.
+    fn navigate_folder_forward(&mut self, ctx: &egui::Context) -> bool {
+        while let Some(next) = self.folder_forward_stack.pop() {
+            if next.is_dir() {
+                if let Some(cur) = self.current_folder() {
+                    if self.folder_back_stack.last().map(|p| p.as_path()) != Some(&cur) {
+                        self.folder_back_stack.push(cur);
+                        if self.folder_back_stack.len() > 50 {
+                            self.folder_back_stack.remove(0);
+                        }
+                    }
+                }
+                let name = next
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| next.display().to_string());
+                self.open_directory_internal(next, ctx);
+                let count = self.files.len();
+                self.show_success(format!(
+                    "{} Forward to \"{}\" ({} image{})",
+                    icons::ICON_IMAGE,
+                    name,
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ));
+                return true;
+            }
+        }
+        false
     }
 
     fn ingest_drops(&mut self, ctx: &egui::Context) {
@@ -841,6 +1550,13 @@ impl PhotonioApp {
         self.current_index = 0;
         self.reset_viewport();
         self.clear_caches();
+        self.refresh_rx = None;
+        self.is_refreshing = false;
+        self.grid_path_editing = false;
+        self.grid_path_invalid = false;
+        self.grid_path_buffer.clear();
+        self.folder_back_stack.clear();
+        self.folder_forward_stack.clear();
         // Forget the saved paths so a restart boots into the clean empty state.
         self.config.last_file_path = None;
         self.config.last_directory = None;
@@ -1139,6 +1855,7 @@ impl PhotonioApp {
             PillAction::OpenFile => self.open_file_dialog(ctx),
             PillAction::OpenFolder => self.open_folder_dialog(),
             PillAction::SaveAs => self.save_current_as(),
+            PillAction::SaveRotation => self.save_rotation_overwrite(ctx),
             PillAction::Print => self.print_current(),
             PillAction::ToggleFilmstrip => {
                 self.config.show_filmstrip = !self.config.show_filmstrip;
@@ -1182,6 +1899,111 @@ impl PhotonioApp {
                 self.advance_after_removal(ctx);
             }
             Err(e) => self.show_status(format!("Delete failed: {e}")),
+        }
+    }
+
+    /// Open the rename dialog for the active or selected file.
+    fn open_rename_dialog(&mut self) {
+        let Some(path) = self.current_file().cloned() else {
+            return;
+        };
+        if !path.is_file() {
+            self.show_status(format!("{} File not found", icons::ICON_WARN));
+            return;
+        }
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if filename.is_empty() {
+            return;
+        }
+        self.context_menu_pos = None;
+        self.show_help = false;
+        self.show_about = false;
+        self.show_image_info = false;
+        self.show_resize_dialog = false;
+        self.rename_state = Some(RenameState {
+            old_path: path,
+            new_name: filename,
+            focus_pending: true,
+        });
+    }
+
+    /// Commit the rename operation on disk and update internal lists and caches.
+    fn commit_rename(&mut self, new_name: &str, ctx: &egui::Context) {
+        let Some(state) = self.rename_state.take() else {
+            return;
+        };
+        let old_path = state.old_path;
+        let trimmed = new_name.trim();
+        let orig_name = old_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if trimmed == orig_name {
+            return;
+        }
+
+        let new_path = old_path.with_file_name(trimmed);
+
+        match safe_rename(&old_path, &new_path) {
+            Ok(()) => {
+                let old_files = self.files.clone();
+                let old_pos = self.files.iter().position(|p| p == &old_path);
+
+                if filesystem::is_supported_path(&new_path) {
+                    if let Some(pos) = old_pos {
+                        self.files[pos] = new_path.clone();
+                    } else {
+                        self.files.push(new_path.clone());
+                    }
+                    filesystem::sort_naturally(&mut self.files);
+                    let new_idx = self
+                        .files
+                        .iter()
+                        .position(|p| p == &new_path)
+                        .unwrap_or(0);
+
+                    self.reconcile_caches_with_rename(
+                        &old_files,
+                        old_pos.map(|op| (op, new_idx)),
+                    );
+
+                    self.current_index = new_idx;
+                    self.loader.set_current_index(new_idx);
+                    self.config.last_file_path = Some(new_path);
+                    if self.view_mode == ViewMode::Grid {
+                        self.scroll_to_selected = true;
+                    }
+                } else {
+                    if let Some(pos) = old_pos {
+                        self.files.remove(pos);
+                    }
+                    self.reconcile_caches(&old_files);
+
+                    if self.files.is_empty() {
+                        self.image = None;
+                        self.preview = None;
+                        self.animation = None;
+                        self.current_index = 0;
+                        self.config.last_file_path = None;
+                        self.empty_folder_since = Some(std::time::Instant::now());
+                        self.reset_viewport();
+                    } else {
+                        let next_idx = self.current_index.min(self.files.len() - 1);
+                        self.navigate_to(next_idx, ctx);
+                    }
+                }
+
+                self.show_success(format!("Renamed to {trimmed}"));
+                ctx.request_repaint();
+            }
+            Err(e) => {
+                self.show_status(format!("Rename failed: {e}"));
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -1252,8 +2074,9 @@ impl PhotonioApp {
         }
     }
 
-    /// Save the in-memory manual rotation back to disk (overwrite or as copy).
-    fn save_rotation(&mut self, ctx: &egui::Context) {
+
+    /// Save the in-memory manual rotation directly back to the active file (overwrite).
+    fn save_rotation_overwrite(&mut self, ctx: &egui::Context) {
         if self.rotation == 0 {
             return;
         }
@@ -1261,32 +2084,23 @@ impl PhotonioApp {
             return;
         };
 
-        let default_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image".to_string());
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Save Rotated Image")
-            .set_file_name(&default_name);
-        if let Some(dir) = path.parent() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(target) = dialog.save_file() else {
-            return; // user canceled
-        };
-
         let result = (|| -> Result<(), String> {
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             let img = viewer::decode(&bytes)?;
             let rotated = viewer::resize::rotate(&img, self.rotation);
-            rotated.save(&target).map_err(|e| e.to_string())
+            rotated.save(&path).map_err(|e| e.to_string())
         })();
 
         match result {
             Ok(()) => {
                 self.rotation = 0;
-                self.show_success("Rotation saved to file");
-                self.open_file(target, ctx);
+                self.show_success("Rotation saved (file overwritten)");
+                self.full_cache.remove(&self.current_index);
+                self.thumb_cache.remove(&self.current_index);
+                self.pending_full.remove(&self.current_index);
+                self.pending_thumb.remove(&self.current_index);
+                self.loader.bump_generation();
+                self.navigate_to(self.current_index, ctx);
             }
             Err(e) => self.show_status(format!("Save rotation failed: {e}")),
         }
@@ -1298,7 +2112,19 @@ impl PhotonioApp {
             return;
         }
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
-        if ctrl || self.config.last_copy_folder.is_none() {
+        let valid_dest = self
+            .config
+            .last_copy_folder
+            .as_ref()
+            .map(|d| d.is_dir())
+            .unwrap_or(false);
+
+        if ctrl || !valid_dest {
+            if !ctrl && self.config.last_copy_folder.is_some() {
+                self.config.last_copy_folder = None;
+                self.save_config();
+                self.show_status("Previous copy destination was moved or deleted; please choose a folder");
+            }
             self.open_folder_browser(PendingOperation::CopyFileTo);
         } else if let Some(dir) = self.config.last_copy_folder.clone() {
             if let Some(src) = self.current_file().cloned() {
@@ -1311,6 +2137,12 @@ impl PhotonioApp {
         let Some(name) = src.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             return;
         };
+        if !dir.is_dir() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                self.show_status(format!("Destination folder missing and cannot be created: {e}"));
+                return;
+            }
+        }
         let dest = unique_dest(&dir, &name);
         match std::fs::copy(&src, &dest) {
             Ok(_) => self.show_success(format!("Copied to {}", dir.display())),
@@ -1324,7 +2156,19 @@ impl PhotonioApp {
             return;
         }
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
-        if ctrl || self.config.last_move_folder.is_none() {
+        let valid_dest = self
+            .config
+            .last_move_folder
+            .as_ref()
+            .map(|d| d.is_dir())
+            .unwrap_or(false);
+
+        if ctrl || !valid_dest {
+            if !ctrl && self.config.last_move_folder.is_some() {
+                self.config.last_move_folder = None;
+                self.save_config();
+                self.show_status("Previous move destination was moved or deleted; please choose a folder");
+            }
             self.open_folder_browser(PendingOperation::MoveFileTo);
         } else if let Some(dir) = self.config.last_move_folder.clone() {
             if let Some(src) = self.current_file().cloned() {
@@ -1337,6 +2181,12 @@ impl PhotonioApp {
         let Some(name) = src.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             return;
         };
+        if !dir.is_dir() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                self.show_status(format!("Destination folder missing and cannot be created: {e}"));
+                return;
+            }
+        }
         let dest = unique_dest(&dir, &name);
         match move_file_fs(&src, &dest) {
             Ok(()) => {
@@ -1362,11 +2212,83 @@ impl PhotonioApp {
             .unwrap_or_else(|| viewer::fit_scale(dimensions, available))
     }
 
-    fn rotate_current(&mut self, ctx: &egui::Context) {
+    fn rotate_current_cw(&mut self, ctx: &egui::Context) {
         self.rotation = (self.rotation + 90) % 360;
         if let Some(image) = &mut self.image {
             image.rotate_90_cw(ctx);
         }
+    }
+
+    fn rotate_current_ccw(&mut self, ctx: &egui::Context) {
+        self.rotation = (self.rotation + 270) % 360;
+        if let Some(image) = &mut self.image {
+            image.rotate_90_ccw(ctx);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Grid tile sizing
+    // ------------------------------------------------------------------
+
+    /// Minimum allowed grid preview container width in logical points.
+    const MIN_GRID_TILE_SIZE: f32 = 80.0;
+    /// Maximum allowed grid preview container width in logical points.
+    const MAX_GRID_TILE_SIZE: f32 = 500.0;
+    /// Default grid preview container width.
+    const DEFAULT_GRID_TILE_SIZE: f32 = 150.0;
+
+    /// The current grid tile width, clamped to the valid range.
+    fn grid_tile_width(&self) -> f32 {
+        self.config
+            .grid_tile_size
+            .clamp(Self::MIN_GRID_TILE_SIZE, Self::MAX_GRID_TILE_SIZE)
+    }
+
+    /// The current grid tile height: thumbnail area plus standard label margin.
+    fn grid_tile_height(&self) -> f32 {
+        self.grid_tile_width() + 26.0
+    }
+
+    /// Adjust the grid tile size by `delta` points (positive = grow), persist,
+    /// show a transient status pill, and anchor the scroll viewport so the target
+    /// item stays fixed on screen rather than jumping or scrolling the background.
+    fn adjust_grid_tile_size(&mut self, delta: f32, ctx: &egui::Context) {
+        let old_tile_w = self.grid_tile_width();
+        let new_tile_w = (old_tile_w + delta).clamp(Self::MIN_GRID_TILE_SIZE, Self::MAX_GRID_TILE_SIZE);
+        if (new_tile_w - old_tile_w).abs() > 0.5 {
+            // Anchor scroll position around the target item (hovered item or current_index)
+            let scroll_id = egui::Id::new("grid-scroll");
+            if let Some(mut state) = egui::scroll_area::State::load(ctx, scroll_id) {
+                let target_index = self.grid_hovered_index.unwrap_or(self.current_index);
+                if target_index < self.files.len() {
+                    let old_columns = self.grid_columns.max(1);
+                    let old_row = target_index / old_columns;
+                    let old_row_h = self.grid_tile_height();
+                    let spacing_y = self.grid_spacing_y;
+                    let old_target_y = old_row as f32 * (old_row_h + spacing_y);
+                    let viewport_offset = old_target_y - state.offset.y;
+
+                    let avail_w = self.grid_available_width.max(100.0);
+                    let new_columns = ((avail_w - 12.0) / new_tile_w).floor().max(1.0) as usize;
+                    let new_row = target_index / new_columns;
+                    let new_row_h = new_tile_w + 26.0;
+                    let new_target_y = new_row as f32 * (new_row_h + spacing_y);
+
+                    state.offset.y = (new_target_y - viewport_offset).max(0.0);
+                    state.store(ctx, scroll_id);
+                }
+            }
+            self.config.grid_tile_size = new_tile_w;
+            self.save_config();
+            self.show_status(format!("Preview size: {:.0}px", new_tile_w));
+        }
+    }
+
+    /// Reset the grid tile size to the default, persist, and anchor viewport.
+    fn reset_grid_tile_size(&mut self, ctx: &egui::Context) {
+        let delta = Self::DEFAULT_GRID_TILE_SIZE - self.grid_tile_width();
+        self.adjust_grid_tile_size(delta, ctx);
+        self.show_success("Preview size reset to default");
     }
 
     // ------------------------------------------------------------------
@@ -1395,7 +2317,8 @@ impl PhotonioApp {
             enter: i.key_pressed(egui::Key::Enter),
             reset_fit: i.key_pressed(egui::Key::Num0),
             reset_100: i.key_pressed(egui::Key::Num1),
-            rotate: i.key_pressed(egui::Key::R) && !(i.modifiers.ctrl && i.modifiers.shift),
+            rotate: i.key_pressed(egui::Key::R) && !i.modifiers.ctrl && !i.modifiers.shift,
+            rotate_ccw: i.key_pressed(egui::Key::R) && i.modifiers.ctrl && !i.modifiers.shift,
             open_file: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::O),
             open_folder: i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O),
             copy_path: copy_event && !i.modifiers.shift,
@@ -1413,10 +2336,13 @@ impl PhotonioApp {
             toggle_play: i.key_pressed(egui::Key::Space),
             step_back: i.key_pressed(egui::Key::OpenBracket),
             step_forward: i.key_pressed(egui::Key::CloseBracket),
-            save_as: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+            save: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+            save_as: i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S),
             print: i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::P),
             toggle_image_info: i.key_pressed(egui::Key::I),
             resize_image: i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::R),
+            refresh_folder: i.key_pressed(egui::Key::F5),
+            rename: i.key_pressed(egui::Key::F2),
         })
     }
 
@@ -1427,7 +2353,10 @@ impl PhotonioApp {
             return;
         }
         if input.rotate {
-            self.rotate_current(ctx);
+            self.rotate_current_cw(ctx);
+        }
+        if input.rotate_ccw {
+            self.rotate_current_ccw(ctx);
         }
         if input.reset_fit {
             self.reset_viewport();
@@ -1436,6 +2365,14 @@ impl PhotonioApp {
             self.zoom = Some(1.0);
             self.pan = egui::Vec2::ZERO;
         }
+        if self.view_mode == ViewMode::Viewer && !self.modal_open() {
+            if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)) {
+                self.navigate_folder_back(ctx);
+            }
+            if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight)) {
+                self.navigate_folder_forward(ctx);
+            }
+        }
         if input.double_clicked && self.view_mode == ViewMode::Viewer {
             let over_image = self
                 .image_rect
@@ -1443,10 +2380,12 @@ impl PhotonioApp {
             if over_image {
                 self.zoom = if self.zoom.is_none() { Some(1.0) } else { None };
                 self.pan = egui::Vec2::ZERO;
-            } else if !self.files.is_empty() {
+            } else if !self.files.is_empty() || self.current_folder().is_some() {
                 // Double-clicking the empty canvas opens the grid selector.
                 self.view_mode = ViewMode::Grid;
                 self.scroll_to_selected = true;
+                self.refresh_multiview_subfolders(ctx);
+                self.trigger_folder_refresh(ctx, false);
             }
         }
     }
@@ -1592,6 +2531,7 @@ impl PhotonioApp {
             || self.show_image_info
             || self.show_resize_dialog
             || self.show_folder_browser
+            || self.rename_state.is_some()
             || self.context_menu_pos.is_some()
     }
 
@@ -1609,6 +2549,7 @@ impl PhotonioApp {
 
     fn show_status(&mut self, message: impl Into<String>) {
         self.feedback = Some((message.into(), std::time::Instant::now()));
+        self.last_interaction_instant = std::time::Instant::now();
     }
 
     /// Show a success toast, prefixed with the check icon.
@@ -1616,13 +2557,21 @@ impl PhotonioApp {
         self.show_status(format!("{} {}", icons::ICON_CHECK, message.into()));
     }
 
-    fn take_status_text(&mut self) -> Option<String> {
+    /// Returns the active transient feedback message and its computed opacity `(0.0..=1.0)`.
+    /// If expired, clears `self.feedback` and returns `None`.
+    fn feedback_info(&mut self) -> Option<(String, f32)> {
         let (message, at) = self.feedback.as_ref()?;
-        if at.elapsed() > std::time::Duration::from_secs(3) {
+        let elapsed = at.elapsed().as_secs_f32();
+        if let Some(alpha) = compute_feedback_alpha(elapsed) {
+            Some((message.clone(), alpha))
+        } else {
             self.feedback = None;
-            return None;
+            None
         }
-        Some(message.clone())
+    }
+
+    fn take_status_text(&mut self) -> Option<String> {
+        self.feedback_info().map(|(msg, _)| msg)
     }
 
     // ------------------------------------------------------------------
@@ -1952,15 +2901,23 @@ impl PhotonioApp {
                         );
                         ui.add_space(8.0);
 
-                        if let Some(status) = status {
-                            ui.label(egui::RichText::new(status).color(SUCCESS_COLOR));
+                        if let Some(status) = &status {
+                            let text_color = if status.contains("failed")
+                                || status.contains("Failed")
+                                || status.starts_with("No image")
+                            {
+                                ERROR_COLOR
+                            } else {
+                                SUCCESS_COLOR
+                            };
+                            ui.label(egui::RichText::new(status).color(text_color));
                         } else {
                             ui.label(name);
                         }
 
                         if let (Some(cur), Some(total)) = (gif_cur, gif_total) {
                             let badge = gif_badge.unwrap_or("[GIF]");
-                            ui.label(egui::RichText::new(badge).color(GIF_COLOR).monospace());
+                            ui.label(egui::RichText::new(badge).color(colors.gold).monospace());
                             ui.label(
                                 egui::RichText::new(format!("Frame {cur} / {total}")).monospace(),
                             );
@@ -1985,6 +2942,46 @@ impl PhotonioApp {
         } else if clicked_next {
             self.step(1, ctx);
         }
+    }
+
+    /// Floating transient status pill displayed when an action produces feedback
+    /// and the regular HUD navigation bar is not shown (multiview grid mode,
+    /// empty folder viewer, or when HUD position is set to Hidden).
+    fn draw_transient_status_pill(&mut self, ctx: &egui::Context) {
+        let Some((message, alpha)) = self.feedback_info() else {
+            return;
+        };
+        if alpha <= 0.0 {
+            return;
+        }
+
+        let colors = self.theme();
+        let (anchor, offset) = match self.config.hud_position {
+            config::HudPosition::Top => (egui::Align2::CENTER_TOP, egui::vec2(0.0, 40.0)),
+            _ => (egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0)),
+        };
+
+        let text_color = if message.contains("failed")
+            || message.contains("Failed")
+            || message.starts_with("No image")
+        {
+            ERROR_COLOR
+        } else {
+            SUCCESS_COLOR
+        };
+
+        egui::Area::new(egui::Id::new("transient-status-pill"))
+            .anchor(anchor, offset)
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                colors.panel(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(message).color(text_color));
+                    });
+                });
+            });
     }
 
     /// Floating glass quick-action pill docked at the top-right of the canvas.
@@ -2064,7 +3061,7 @@ impl PhotonioApp {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_opacity(opacity);
-                egui::Frame::none()
+                let frame_resp = egui::Frame::none()
                     .fill(colors.panel_fill)
                     .stroke(egui::Stroke::new(1.0_f32, colors.border))
                     .rounding(10.0)
@@ -2081,40 +3078,59 @@ impl PhotonioApp {
                             "{} Support",
                             icons::ICON_PAYPAL
                         ))
-                        .color(GOLD_COLOR)
+                        .color(colors.gold)
                         .size(14.0);
-                        if ui
-                            .add(egui::Button::new(label).frame(false))
-                            .on_hover_text("Support Photonio development on PayPal")
-                            .clicked()
-                        {
-                            ctx.open_url(egui::OpenUrl::new_tab(DONATION_URL));
-                        }
+
+                        let link = egui::Hyperlink::from_label_and_url(label, DONATION_URL);
+                        ui.add(link)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Support Photonio development on PayPal");
                     });
+
+                if frame_resp.response.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
             });
     }
 
     /// Render the pill's buttons; returns the clicked action, if any.
     fn pill_buttons(&self, ui: &mut egui::Ui) -> Option<PillAction> {
+        let colors = self.theme();
+
+        // When rotation is pending on the active static image, pop a breathing Save Rotation action
+        if self.view_mode == ViewMode::Viewer && self.image.is_some() && self.rotation != 0 {
+            if pill_button_breathing(
+                ui,
+                icons::ICON_SAVE,
+                "Save Rotation (Ctrl+S)",
+                &colors,
+            )
+            .clicked()
+            {
+                return Some(PillAction::SaveRotation);
+            }
+            ui.separator();
+        }
+
         if self.config.pill_open_file {
-            if pill_button(ui, icons::ICON_OPEN_FILE, "Open File (Ctrl+O)", false).clicked() {
+            if pill_button(ui, icons::ICON_OPEN_FILE, "Open File (Ctrl+O)", false, colors.gold).clicked() {
                 return Some(PillAction::OpenFile);
             }
         }
         if self.config.pill_open_folder {
-            if pill_button(ui, icons::ICON_OPEN_FOLDER, "Open Folder (Ctrl+Shift+O)", false)
+            if pill_button(ui, icons::ICON_OPEN_FOLDER, "Open Folder (Ctrl+Shift+O)", false, colors.gold)
                 .clicked()
             {
                 return Some(PillAction::OpenFolder);
             }
         }
         if self.config.pill_save_as {
-            if pill_button(ui, icons::ICON_SAVE, "Save As (Ctrl+S)", false).clicked() {
+            if pill_button(ui, icons::ICON_SAVE, "Save As (Ctrl+Shift+S)", false, colors.gold).clicked() {
                 return Some(PillAction::SaveAs);
             }
         }
         if self.config.pill_print {
-            if pill_button(ui, icons::ICON_PRINT, "Print (Ctrl+P)", false).clicked() {
+            if pill_button(ui, icons::ICON_PRINT, "Print (Ctrl+P)", false, colors.gold).clicked() {
                 return Some(PillAction::Print);
             }
         }
@@ -2138,6 +3154,7 @@ impl PhotonioApp {
                 icons::ICON_FILMSTRIP,
                 "Toggle Filmstrip (T)",
                 self.config.show_filmstrip,
+                colors.gold,
             )
             .clicked()
             {
@@ -2189,10 +3206,7 @@ impl PhotonioApp {
             painter.rect_stroke(
                 rect,
                 6.0,
-                egui::Stroke::new(
-                    2.0_f32,
-                    egui::Color32::from_rgba_unmultiplied(255, 200, 50, 220),
-                ),
+                egui::Stroke::new(2.0_f32, colors.gold),
             );
         } else if response.hovered() {
             painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0_f32, colors.muted));
@@ -2208,24 +3222,38 @@ impl PhotonioApp {
     /// Draw one grid thumbnail card; returns the interaction, if any.
     fn grid_tile(&mut self, ui: &mut egui::Ui, index: usize) -> Option<GridTileAction> {
         let colors = self.theme();
+        let tw = self.grid_tile_width();
+        let th = self.grid_tile_height();
+
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(150.0, 170.0), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(tw, th), egui::Sense::click());
         let painter = ui.painter();
-        let card = rect.shrink(4.0);
+        let card = rect.shrink(3.0);
 
         // Rounded card background (theme-aware glass tint).
         painter.rect_filled(card, 6.0, colors.placeholder);
 
         // Selection / hover accent frame.
-        if index == self.current_index {
-            painter.rect_stroke(card, 6.0, egui::Stroke::new(2.0_f32, GOLD_COLOR));
+        if index == self.current_index && self.grid_selected_folder.is_none() {
+            painter.rect_stroke(card, 6.0, egui::Stroke::new(2.0_f32, colors.gold));
         } else if response.hovered() {
             painter.rect_stroke(card, 6.0, egui::Stroke::new(1.0_f32, colors.muted));
         }
 
-        // Aspect-preserved thumbnail inside a 126×122 box.
+        if response.hovered() {
+            self.grid_hovered_index = Some(index);
+        }
+
+        // Preview image container occupies nearly the entire card.
+        // Margins and bottom label stay at clean, standard unscaled sizes.
+        let pad = 6.0;
+        let top_pad = 6.0;
+        let label_row_h = 20.0;
+        let thumb_w = (tw - pad * 2.0).max(10.0);
+        let thumb_h = (th - top_pad - pad - label_row_h).max(10.0);
         let thumb_box =
-            egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 8.0), egui::vec2(126.0, 122.0));
+            egui::Rect::from_min_size(rect.min + egui::vec2(pad, top_pad), egui::vec2(thumb_w, thumb_h));
+
         match self.thumb_cache.get(&index) {
             Some(thumb) => {
                 let img_rect = fit_rect_contain(thumb.dims, thumb_box);
@@ -2241,7 +3269,7 @@ impl PhotonioApp {
                     thumb_box.center(),
                     egui::Align2::CENTER_CENTER,
                     "✕",
-                    egui::FontId::proportional(18.0),
+                    egui::FontId::proportional(16.0),
                     colors.muted,
                 );
             }
@@ -2250,7 +3278,9 @@ impl PhotonioApp {
             }
         }
 
-        // Truncated filename label (11px).
+        // Filename label stays at the standard readable view size (11.5px) regardless of preview zoom.
+        let label_font = 11.5;
+        let max_chars = ((tw - pad * 2.0) / (label_font * 0.55)) as usize;
         let name = self
             .files
             .get(index)
@@ -2258,10 +3288,10 @@ impl PhotonioApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         painter.text(
-            rect.min + egui::vec2(12.0, 136.0),
+            rect.min + egui::vec2(pad, th - label_row_h),
             egui::Align2::LEFT_TOP,
-            truncate(&name, 18),
-            egui::FontId::proportional(11.0),
+            truncate(&name, max_chars.max(4)),
+            egui::FontId::proportional(label_font),
             colors.primary,
         );
 
@@ -2277,6 +3307,158 @@ impl PhotonioApp {
         }
     }
 
+    /// Draw one grid folder card with either large folder icon or quad (2x2) image previews.
+    fn grid_folder_tile(&mut self, ui: &mut egui::Ui, folder_index: usize) -> Option<GridFolderAction> {
+        let colors = self.theme();
+        let tw = self.grid_tile_width();
+        let th = self.grid_tile_height();
+
+        let folder = match self.multiview_subfolders.get(folder_index) {
+            Some(f) => f.clone(),
+            None => return None,
+        };
+
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(tw, th), egui::Sense::click());
+        let painter = ui.painter();
+        let card = rect.shrink(3.0);
+
+        // Rounded card background
+        painter.rect_filled(card, 6.0, colors.placeholder);
+
+        // Selection / hover accent frame
+        let is_selected = self.grid_selected_folder == Some(folder_index);
+        if is_selected {
+            painter.rect_stroke(card, 6.0, egui::Stroke::new(2.0_f32, colors.gold));
+        } else if response.hovered() {
+            painter.rect_stroke(card, 6.0, egui::Stroke::new(1.0_f32, colors.muted));
+        }
+
+        let pad = 5.0;
+        let top_pad = 5.0;
+        let label_row_h = 20.0;
+        let thumb_w = (tw - pad * 2.0).max(10.0);
+        let thumb_h = (th - top_pad - pad - label_row_h).max(10.0);
+        let thumb_box = egui::Rect::from_min_size(
+            rect.min + egui::vec2(pad, top_pad),
+            egui::vec2(thumb_w, thumb_h),
+        );
+
+        // Leave a small border around the folder symbol within thumb_box
+        let border = 4.0_f32;
+        let avail_w = (thumb_w - border * 2.0).max(10.0);
+        let avail_h = (thumb_h - border * 2.0).max(10.0);
+
+        // FontAwesome folder glyph (\u{f07b}) natural visual aspect ratio is 1.0 : 0.82.
+        // Scale font_size so the glyph stretches to fill thumb_box leaving a small border.
+        let font_size = avail_w.min(avail_h / 0.82);
+        let folder_w = font_size;
+        let folder_h = font_size * 0.82;
+
+        let folder_rect = egui::Rect::from_center_size(
+            thumb_box.center(),
+            egui::vec2(folder_w, folder_h),
+        );
+
+        let folder_color = if colors.dark_mode {
+            egui::Color32::from_rgb(228, 160, 30)
+        } else {
+            egui::Color32::from_rgb(215, 150, 25)
+        };
+
+        let galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                icons::ICON_FOLDER.to_string(),
+                egui::FontId::proportional(font_size),
+                folder_color,
+            )
+        });
+        let galley_origin = folder_rect.min - egui::vec2(0.0, font_size * 0.02);
+        painter.galley(galley_origin, galley, folder_color);
+
+        if !folder.preview_paths.is_empty() {
+            // Folders WITH images: the 4 first images stay ABOVE the folder symbol,
+            // inset so the golden folder tab and borders frame the images.
+            let quad_left = folder_rect.min.x + folder_rect.width() * 0.125;
+            let quad_right = folder_rect.max.x - folder_rect.width() * 0.120;
+            let quad_top = folder_rect.min.y + folder_rect.height() * 0.200;
+            let quad_bottom = folder_rect.max.y - folder_rect.height() * 0.090;
+            let quad_rect = egui::Rect::from_min_max(
+                egui::pos2(quad_left, quad_top),
+                egui::pos2(quad_right, quad_bottom),
+            );
+
+            let gap = 2.0_f32;
+            let cell_w = ((quad_rect.width() - gap) * 0.5).max(1.0);
+            let cell_h = ((quad_rect.height() - gap) * 0.5).max(1.0);
+
+            for idx in 0..4 {
+                let r = idx / 2;
+                let c = idx % 2;
+                let cell_rect = egui::Rect::from_min_size(
+                    quad_rect.min + egui::vec2(c as f32 * (cell_w + gap), r as f32 * (cell_h + gap)),
+                    egui::vec2(cell_w, cell_h),
+                );
+
+                if let Some(img_path) = folder.preview_paths.get(idx) {
+                    if let Some(tex) = self.multiview_folder_textures.get(img_path) {
+                        let uv = cover_uv(tex.size(), cell_rect);
+                        painter.add(egui::epaint::RectShape {
+                            rect: cell_rect,
+                            rounding: egui::Rounding::same(2.0),
+                            fill: egui::Color32::WHITE,
+                            stroke: egui::Stroke::NONE,
+                            blur_width: 0.0,
+                            fill_texture_id: tex.id(),
+                            uv,
+                        });
+                    } else {
+                        // Image still decoding: subtle dark glass slot
+                        let slot_fill = if colors.dark_mode {
+                            egui::Color32::from_black_alpha(80)
+                        } else {
+                            egui::Color32::from_black_alpha(30)
+                        };
+                        painter.rect_filled(cell_rect, 2.0, slot_fill);
+                    }
+                }
+            }
+        }
+
+        // Folder name label (with small folder prefix)
+        let label_font = 11.5;
+        let max_chars = ((tw - pad * 2.0) / (label_font * 0.55)) as usize;
+        let label_text = format!("{} {}", icons::ICON_FOLDER, folder.name);
+        painter.text(
+            rect.min + egui::vec2(pad, th - label_row_h),
+            egui::Align2::LEFT_TOP,
+            truncate(&label_text, max_chars.max(4)),
+            egui::FontId::proportional(label_font),
+            colors.primary,
+        );
+
+        let tooltip = format!(
+            "Folder: {}\n{}",
+            folder.name,
+            if folder.preview_paths.is_empty() {
+                "No images inside".to_string()
+            } else {
+                format!("{} image preview{}", folder.preview_paths.len(), if folder.preview_paths.len() == 1 { "" } else { "s" })
+            }
+        );
+        let response = response.on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        if response.double_clicked() {
+            Some(GridFolderAction::Open(folder_index))
+        } else if response.secondary_clicked() {
+            let pos = response.interact_pointer_pos.unwrap_or_else(|| rect.center());
+            Some(GridFolderAction::ContextMenu(folder_index, pos))
+        } else if response.clicked() {
+            Some(GridFolderAction::Select(folder_index))
+        } else {
+            None
+        }
+    }
+
     /// Full-window grid selector view (virtualized thumbnail browser).
     fn draw_grid_view(&mut self, ctx: &egui::Context) {
         let len = self.files.len();
@@ -2284,43 +3466,483 @@ impl PhotonioApp {
         let mut open_index: Option<usize> = None;
         let mut menu_index: Option<usize> = None;
         let mut menu_pos: Option<egui::Pos2> = None;
+        let mut navigate_dir: Option<PathBuf> = None;
+        let mut navigate_back = false;
+        let mut navigate_forward = false;
+        let mut open_folder_browser = false;
 
-        let folder = self
-            .files
-            .first()
-            .and_then(|p| p.parent())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let colors = self.theme();
+        let current_dir = self.current_folder();
+
+        // Keep path buffer in sync with active folder when not in raw text edit mode.
+        if !self.grid_path_editing {
+            self.grid_path_buffer = current_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+        }
+
+        // Global shortcut Ctrl+L: focus the path bar for direct path entry in grid view.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
+            self.grid_path_editing = true;
+            self.grid_path_invalid = false;
+            self.grid_path_focus_pending = true;
+            if let Some(dir) = &current_dir {
+                self.grid_path_buffer = dir.display().to_string();
+            }
+        }
+
+        // Global shortcuts for folder navigation (suppressed while editing raw path or modal open)
+        if !self.grid_path_editing && !self.modal_open() {
+            if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)) {
+                navigate_back = true;
+            }
+            if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight)) {
+                navigate_forward = true;
+            }
+            let backspace = ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Backspace));
+            let alt_up = ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp));
+            if alt_up || backspace {
+                if let Some(parent) = current_dir.as_ref().and_then(|p| p.parent()) {
+                    navigate_dir = Some(parent.to_path_buf());
+                }
+            }
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                // Slim top header bar.
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} {} · {} images", icons::ICON_OPEN_FOLDER, folder, len));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Back to Viewer (Enter)").clicked() {
-                            back_clicked = true;
-                        }
+                // Top header bar with active path bar & folder browser button.
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // Right-side controls (Back button, Up one level button, item counts)
+                            let folder_count = if self.config.multiview_show_folders {
+                                self.multiview_subfolders.len()
+                            } else {
+                                0
+                            };
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let back_btn = colors.button_secondary(
+                                    ui,
+                                    format!("{} Back to Viewer (Enter)", icons::ICON_IMAGE),
+                                    egui::vec2(0.0, 26.0),
+                                    true,
+                                );
+                                if back_btn.clicked() {
+                                    back_clicked = true;
+                                }
+
+                                ui.add_space(6.0);
+
+                                let can_up = current_dir.as_ref().and_then(|p| p.parent()).is_some();
+                                let up_btn = colors.button_secondary(
+                                    ui,
+                                    format!("{} Up", icons::ICON_UP),
+                                    egui::vec2(0.0, 26.0),
+                                    can_up,
+                                );
+                                if up_btn.on_hover_text("Go to parent folder (Backspace / Alt+Up)").clicked() && can_up {
+                                    if let Some(parent) = current_dir.as_ref().and_then(|p| p.parent()) {
+                                        navigate_dir = Some(parent.to_path_buf());
+                                    }
+                                }
+
+                                ui.add_space(8.0);
+                                let count_text = if folder_count > 0 && len > 0 {
+                                    format!("{folder_count} folder{}, {len} image{}", if folder_count == 1 { "" } else { "s" }, if len == 1 { "" } else { "s" })
+                                } else if folder_count > 0 {
+                                    format!("{folder_count} folder{}", if folder_count == 1 { "" } else { "s" })
+                                } else {
+                                    format!("{len} image{}", if len == 1 { "" } else { "s" })
+                                };
+                                ui.label(
+                                    egui::RichText::new(count_text)
+                                        .color(colors.muted)
+                                        .size(12.5),
+                                );
+                                ui.add_space(8.0);
+
+                                // Left-side controls occupy the remaining space
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                            // 1. Back button (chevron-left)
+                            let can_back = !self.folder_back_stack.is_empty();
+                            let back_tooltip = if let Some(p) = self.folder_back_stack.last() {
+                                let name = p
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| p.display().to_string());
+                                format!("Back to \"{}\" (Alt+Left)", name)
+                            } else {
+                                "Back (Alt+Left)".to_string()
+                            };
+                            if colors
+                                .nav_icon_button(
+                                    ui,
+                                    icons::ICON_PREV,
+                                    13.0,
+                                    egui::vec2(26.0, 26.0),
+                                    can_back,
+                                    &back_tooltip,
+                                )
+                                .clicked()
+                            {
+                                navigate_back = true;
+                            }
+
+                            // 2. Forward button (chevron-right)
+                            let can_forward = !self.folder_forward_stack.is_empty();
+                            let forward_tooltip = if let Some(p) = self.folder_forward_stack.last() {
+                                let name = p
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| p.display().to_string());
+                                format!("Forward to \"{}\" (Alt+Right)", name)
+                            } else {
+                                "Forward (Alt+Right)".to_string()
+                            };
+                            if colors
+                                .nav_icon_button(
+                                    ui,
+                                    icons::ICON_NEXT,
+                                    13.0,
+                                    egui::vec2(26.0, 26.0),
+                                    can_forward,
+                                    &forward_tooltip,
+                                )
+                                .clicked()
+                            {
+                                navigate_forward = true;
+                            }
+
+                            // 3. Up to parent directory button (arrow-up)
+                            let can_up = current_dir.as_ref().and_then(|p| p.parent()).is_some();
+                            if colors
+                                .nav_icon_button(
+                                    ui,
+                                    icons::ICON_UP,
+                                    13.0,
+                                    egui::vec2(26.0, 26.0),
+                                    can_up,
+                                    "Go to parent folder (Backspace / Alt+Up)",
+                                )
+                                .clicked()
+                            {
+                                if let Some(parent) = current_dir.as_ref().and_then(|p| p.parent()) {
+                                    navigate_dir = Some(parent.to_path_buf());
+                                }
+                            }
+
+                            ui.add_space(2.0);
+
+                            // Inset active path bar (input-like frame with embedded folder button and breadcrumbs)
+                            let frame_stroke = if self.grid_path_invalid {
+                                egui::Stroke::new(1.0_f32, ERROR_COLOR)
+                            } else {
+                                egui::Stroke::new(1.0_f32, colors.border)
+                            };
+                            let input_fill = if colors.dark_mode {
+                                egui::Color32::from_black_alpha(60)
+                            } else {
+                                egui::Color32::from_black_alpha(10)
+                            };
+
+                            egui::Frame::none()
+                                .fill(input_fill)
+                                .stroke(frame_stroke)
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin {
+                                    left: 3.0,
+                                    right: 6.0,
+                                    top: 2.0,
+                                    bottom: 2.0,
+                                })
+                                .show(ui, |ui| {
+                                    ui.set_min_height(22.0);
+                                    ui.set_min_width(ui.available_width().max(60.0));
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+
+                                        // Folder symbol active button inside the left edge of the address bar
+                                        if colors
+                                            .nav_icon_button(
+                                                ui,
+                                                icons::ICON_OPEN_FOLDER,
+                                                13.0,
+                                                egui::vec2(22.0, 22.0),
+                                                true,
+                                                "Choose folder... (Ctrl+Shift+O)",
+                                            )
+                                            .clicked()
+                                        {
+                                            open_folder_browser = true;
+                                        }
+
+                                        if self.grid_path_editing {
+                                            // Raw path edit mode
+                                            let mut output = egui::TextEdit::singleline(
+                                                &mut self.grid_path_buffer,
+                                            )
+                                            .desired_width(f32::INFINITY)
+                                            .frame(false)
+                                            .hint_text("Enter folder path...")
+                                            .text_color(if self.grid_path_invalid {
+                                                ERROR_COLOR
+                                            } else {
+                                                colors.primary
+                                            })
+                                            .show(ui);
+
+                                            if output.response.changed() {
+                                                self.grid_path_invalid = false;
+                                            }
+
+                                            if self.grid_path_focus_pending {
+                                                output.response.request_focus();
+                                                let len = self.grid_path_buffer.len();
+                                                let range = egui::text::CCursorRange::two(
+                                                    egui::text::CCursor::new(0),
+                                                    egui::text::CCursor::new(len),
+                                                );
+                                                output.state.cursor.set_char_range(Some(range));
+                                                output.state.store(ui.ctx(), output.response.id);
+                                                self.grid_path_focus_pending = false;
+                                            }
+
+                                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            if enter {
+                                                let path = viewer::folder_browser::normalize_path(
+                                                    &self.grid_path_buffer,
+                                                );
+                                                if path.is_dir() {
+                                                    navigate_dir = Some(path);
+                                                    self.grid_path_editing = false;
+                                                    self.grid_path_invalid = false;
+                                                } else {
+                                                    self.grid_path_invalid = true;
+                                                    self.show_status(format!(
+                                                        "⚠️ Folder does not exist: {}",
+                                                        path.display()
+                                                    ));
+                                                }
+                                            } else if esc || (output.response.lost_focus() && !self.grid_path_invalid) {
+                                                self.grid_path_editing = false;
+                                                self.grid_path_invalid = false;
+                                                if let Some(dir) = &current_dir {
+                                                    self.grid_path_buffer = dir.display().to_string();
+                                                } else {
+                                                    self.grid_path_buffer.clear();
+                                                }
+                                            }
+                                        } else {
+                                            // Interactive breadcrumb mode with responsive "..." collapse
+                                            let mut enter_edit = false;
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+                                                if let Some(dir) = &current_dir {
+                                                    let crumbs = viewer::folder_browser::breadcrumbs(dir);
+                                                    let avail_crumb_w = (ui.available_width() - 24.0).max(40.0);
+                                                    let segments = layout_breadcrumbs(&crumbs, avail_crumb_w, |text, is_bold| {
+                                                        ui.fonts(|f| {
+                                                            let font_id = if is_bold {
+                                                                egui::FontId::new(13.0, egui::FontFamily::Proportional)
+                                                            } else {
+                                                                egui::FontId::proportional(13.0)
+                                                            };
+                                                            f.layout_no_wrap(text.to_owned(), font_id, egui::Color32::WHITE).size().x
+                                                        })
+                                                    });
+
+                                                    for (i, segment) in segments.iter().enumerate() {
+                                                        if i > 0 {
+                                                            ui.label(
+                                                                egui::RichText::new("›")
+                                                                    .size(12.0)
+                                                                    .color(colors.muted),
+                                                            );
+                                                        }
+                                                        match segment {
+                                                            BreadcrumbSegment::Crumb { label, path, is_current } => {
+                                                                let text = if *is_current {
+                                                                    egui::RichText::new(label)
+                                                                        .size(13.0)
+                                                                        .strong()
+                                                                        .color(colors.primary)
+                                                                } else {
+                                                                    egui::RichText::new(label)
+                                                                        .size(13.0)
+                                                                        .color(colors.muted)
+                                                                };
+                                                                let btn_resp = ui.scope(|ui| {
+                                                                    let visuals = ui.visuals_mut();
+                                                                    visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                                                    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                                                                    visuals.widgets.hovered.bg_fill = if colors.dark_mode {
+                                                                        egui::Color32::from_white_alpha(22)
+                                                                    } else {
+                                                                        egui::Color32::from_black_alpha(18)
+                                                                    };
+                                                                    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                                                                    visuals.widgets.active.bg_fill = if colors.dark_mode {
+                                                                        egui::Color32::from_white_alpha(35)
+                                                                    } else {
+                                                                        egui::Color32::from_black_alpha(28)
+                                                                    };
+                                                                    visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                                                                    ui.spacing_mut().button_padding = egui::vec2(4.0, 1.5);
+                                                                    ui.add(egui::Button::new(text).rounding(3.0))
+                                                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                                });
+                                                                if btn_resp.inner.clicked() {
+                                                                    navigate_dir = Some(path.clone());
+                                                                }
+                                                            }
+                                                            BreadcrumbSegment::Ellipsis { hidden } => {
+                                                                let popup_id = ui.make_persistent_id("breadcrumb_ellipsis_popup");
+                                                                let tooltip = format!(
+                                                                    "Hidden folders:\n{}",
+                                                                    hidden.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(" › ")
+                                                                );
+                                                                let btn_resp = ui.scope(|ui| {
+                                                                    let visuals = ui.visuals_mut();
+                                                                    visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                                                    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                                                                    visuals.widgets.hovered.bg_fill = if colors.dark_mode {
+                                                                        egui::Color32::from_white_alpha(22)
+                                                                    } else {
+                                                                        egui::Color32::from_black_alpha(18)
+                                                                    };
+                                                                    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                                                                    visuals.widgets.active.bg_fill = if colors.dark_mode {
+                                                                        egui::Color32::from_white_alpha(35)
+                                                                    } else {
+                                                                        egui::Color32::from_black_alpha(28)
+                                                                    };
+                                                                    visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                                                                    ui.spacing_mut().button_padding = egui::vec2(4.0, 1.5);
+                                                                    ui.add(
+                                                                        egui::Button::new(
+                                                                            egui::RichText::new("...")
+                                                                                .size(13.0)
+                                                                                .color(colors.muted),
+                                                                        )
+                                                                        .rounding(3.0),
+                                                                    )
+                                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                                    .on_hover_text(tooltip)
+                                                                });
+
+                                                                if btn_resp.inner.clicked() {
+                                                                    ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                                                }
+
+                                                                egui::popup_below_widget(
+                                                                    ui,
+                                                                    popup_id,
+                                                                    &btn_resp.inner,
+                                                                    egui::PopupCloseBehavior::CloseOnClick,
+                                                                    |ui| {
+                                                                        ui.set_min_width(140.0);
+                                                                        for (hidden_label, hidden_path) in hidden {
+                                                                            if ui.button(format!("{} {}", icons::ICON_FOLDER, hidden_label)).clicked() {
+                                                                                navigate_dir = Some(hidden_path.clone());
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    ui.label(
+                                                        egui::RichText::new("No folder selected")
+                                                            .size(13.0)
+                                                            .color(colors.muted)
+                                                            .italics(),
+                                                    );
+                                                }
+
+                                                // Empty area to the right: clicking switches into raw text edit mode
+                                                let avail = ui.available_size();
+                                                if avail.x > 0.0 {
+                                                    let (_empty_rect, empty_resp) = ui.allocate_exact_size(avail, egui::Sense::click());
+                                                    if empty_resp.clicked() {
+                                                        enter_edit = true;
+                                                    }
+                                                }
+                                            });
+
+                                            if enter_edit {
+                                                self.grid_path_editing = true;
+                                                if let Some(dir) = &current_dir {
+                                                    self.grid_path_buffer = dir.display().to_string();
+                                                } else {
+                                                    self.grid_path_buffer.clear();
+                                                }
+                                                self.grid_path_invalid = false;
+                                                self.grid_path_focus_pending = true;
+                                            }
+                                        }
+                                    });
+                                });
+                        });
                     });
                 });
-                ui.separator();
+            });
+            ui.separator();
+
+                let folder_count = if self.config.multiview_show_folders {
+                    self.multiview_subfolders.len()
+                } else {
+                    0
+                };
+                let total_items = folder_count + len;
+
+                if total_items == 0 {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        ui.label(
+                            egui::RichText::new(icons::ICON_IMAGE)
+                                .size(48.0)
+                                .color(colors.muted),
+                        );
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new("No supported images or folders in this location")
+                                .size(16.0)
+                                .strong()
+                                .color(colors.primary),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Click a folder in the path bar above, type a path, or click the folder button to browse.")
+                                .size(12.0)
+                                .color(colors.muted),
+                        );
+                    });
+                }
 
                 // Virtualized grid: only visible rows are laid out and only
                 // their thumbnails are requested (bounds memory for huge folders).
-                // Subtract a little for the vertical scrollbar so the last
-                // column never slips underneath it.
-                let columns = ((ui.available_width() - 12.0) / 150.0).floor().max(1.0) as usize;
+                let tile_w = self.grid_tile_width();
+                let tile_h = self.grid_tile_height();
+                let avail_w = ui.available_width();
+                self.grid_available_width = avail_w;
+                self.grid_spacing_y = ui.spacing().item_spacing.y;
+                let columns = ((avail_w - 12.0) / tile_w).floor().max(1.0) as usize;
                 self.grid_columns = columns;
-                let row_height = 170.0;
-                let total_rows = if len == 0 { 0 } else { (len + columns - 1) / columns };
+                let row_height = tile_h;
+                let total_rows = if total_items == 0 { 0 } else { (total_items + columns - 1) / columns };
+
+                let needed_lod = loader::PreviewLod::from_tile_width(tile_w, ui.ctx().pixels_per_point());
 
                 // Boundary-aware auto-scroll: bring the selected card into view
-                // only when it falls outside the current viewport. The card's
-                // screen rect is computed from the fixed row/column geometry, so
-                // this works even for off-screen rows (Up past the top edge and
-                // Home/End jumps). `scroll_to_rect(..., None)` performs the
-                // minimal scroll — no centering — so in-view movement never snaps.
+                // only when it falls outside the current viewport.
                 egui::ScrollArea::vertical()
                     .id_source("grid-scroll")
                     .auto_shrink([false, false])
@@ -2330,17 +3952,27 @@ impl PhotonioApp {
                             if total_rows > 0 {
                                 let spacing = ui.spacing().item_spacing;
                                 let min_row = row_range.start;
-                                let row = self.current_index / columns;
-                                let col = self.current_index % columns;
+                                let unified_idx = match self.grid_selected_folder {
+                                    Some(f) if f < folder_count => f,
+                                    _ => {
+                                        if len > 0 {
+                                            folder_count + self.current_index.min(len - 1)
+                                        } else {
+                                            0
+                                        }
+                                    }
+                                };
+                                let row = unified_idx / columns;
+                                let col = unified_idx % columns;
                                 let origin = ui.max_rect().min;
                                 let rect = egui::Rect::from_min_size(
                                     egui::pos2(
-                                        origin.x + col as f32 * (150.0 + spacing.x),
+                                        origin.x + col as f32 * (tile_w + spacing.x),
                                         origin.y
                                             + (row as isize - min_row as isize) as f32
                                                 * (row_height + spacing.y),
                                     ),
-                                    egui::vec2(150.0, row_height),
+                                    egui::vec2(tile_w, row_height),
                                 );
                                 ui.scroll_to_rect(rect, None);
                             }
@@ -2349,20 +3981,44 @@ impl PhotonioApp {
                         for row in row_range {
                             ui.horizontal(|ui| {
                                 for col in 0..columns {
-                                    let index = row * columns + col;
-                                    if index >= len {
+                                    let item_idx = row * columns + col;
+                                    if item_idx >= total_items {
                                         break;
                                     }
-                                    self.request_thumb_for(index);
-                                    if let Some(action) = self.grid_tile(ui, index) {
-                                        match action {
-                                            GridTileAction::Select(i) => {
-                                                self.grid_select(i);
+                                    if item_idx < folder_count {
+                                        // Folder item
+                                        if let Some(action) = self.grid_folder_tile(ui, item_idx) {
+                                            match action {
+                                                GridFolderAction::Select(idx) => {
+                                                    self.grid_selected_folder = Some(idx);
+                                                }
+                                                GridFolderAction::Open(idx) => {
+                                                    if let Some(folder) = self.multiview_subfolders.get(idx) {
+                                                        navigate_dir = Some(folder.path.clone());
+                                                    }
+                                                }
+                                                GridFolderAction::ContextMenu(_idx, _pos) => {}
                                             }
-                                            GridTileAction::Open(i) => open_index = Some(i),
-                                            GridTileAction::ContextMenu(i, pos) => {
-                                                menu_index = Some(i);
-                                                menu_pos = Some(pos);
+                                        }
+                                    } else {
+                                        // Image item
+                                        let img_idx = item_idx - folder_count;
+                                        self.request_thumb_for(img_idx, needed_lod);
+                                        if let Some(action) = self.grid_tile(ui, img_idx) {
+                                            match action {
+                                                GridTileAction::Select(i) => {
+                                                    self.grid_selected_folder = None;
+                                                    self.grid_select(i);
+                                                }
+                                                GridTileAction::Open(i) => {
+                                                    self.grid_selected_folder = None;
+                                                    open_index = Some(i);
+                                                }
+                                                GridTileAction::ContextMenu(i, pos) => {
+                                                    self.grid_selected_folder = None;
+                                                    menu_index = Some(i);
+                                                    menu_pos = Some(pos);
+                                                }
                                             }
                                         }
                                     }
@@ -2372,7 +4028,7 @@ impl PhotonioApp {
                     });
             });
 
-        // Post-actions (double-click open, right-click menu, back button).
+        // Post-actions (double-click open, right-click menu, back button, folder navigation).
         if let Some(index) = open_index {
             self.current_index = index;
             self.leave_grid(ctx);
@@ -2383,7 +4039,60 @@ impl PhotonioApp {
             self.context_menu_pos = menu_pos;
         }
         if back_clicked {
-            self.leave_grid(ctx);
+            if !self.files.is_empty() {
+                self.leave_grid(ctx);
+            } else {
+                self.show_status("No image to view in this folder");
+            }
+            return;
+        }
+        if navigate_back {
+            self.navigate_folder_back(ctx);
+            return;
+        }
+        if navigate_forward {
+            self.navigate_folder_forward(ctx);
+            return;
+        }
+        if open_folder_browser {
+            self.grid_path_editing = false;
+            self.grid_path_invalid = false;
+            self.open_folder_dialog();
+            return;
+        }
+        if let Some(path) = navigate_dir {
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                self.open_directory(path.clone(), ctx);
+                self.scroll_to_selected = true;
+                self.grid_selected_folder = None;
+                self.grid_path_buffer = path.display().to_string();
+                self.grid_path_editing = false;
+                self.grid_path_invalid = false;
+                let count = self.files.len();
+                let f_count = self.multiview_subfolders.len();
+                if count > 0 && f_count > 0 {
+                    self.show_success(format!("{name} ({f_count} folders, {count} images)"));
+                } else if count > 0 {
+                    self.show_success(format!("{name} ({count} images)"));
+                } else if f_count > 0 {
+                    self.show_success(format!("{name} ({f_count} folders)"));
+                } else {
+                    self.show_success(format!("{name} (folder is empty)"));
+                }
+                self.show_success(format!(
+                    "{} Opened folder \"{}\" ({} image{})",
+                    icons::ICON_IMAGE,
+                    name,
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ));
+            } else {
+                self.show_status(format!("⚠️ Folder does not exist: {}", path.display()));
+            }
         }
     }
 
@@ -2488,24 +4197,32 @@ impl PhotonioApp {
             .config
             .last_copy_folder
             .as_ref()
-            .map(|dir| {
-                let name = dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dir.display().to_string());
-                format!("Copy to {name}")
+            .and_then(|dir| {
+                if dir.is_dir() {
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string());
+                    Some(format!("Copy to {name}"))
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| "Copy File to...".to_string());
         let move_target_label = self
             .config
             .last_move_folder
             .as_ref()
-            .map(|dir| {
-                let name = dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dir.display().to_string());
-                format!("Move to {name}")
+            .and_then(|dir| {
+                if dir.is_dir() {
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string());
+                    Some(format!("Move to {name}"))
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| "Move File to...".to_string());
 
@@ -2581,17 +4298,21 @@ impl PhotonioApp {
                     }
 
                     ui.separator();
-                    if menu_item_enabled(ui, "Resize Image...", has_static).clicked() {
+                    if menu_item_enabled(ui, "Resize Image... (Ctrl+Shift+R)", has_static).clicked() {
                         action = Some(MenuAction::ResizeImage);
                         should_close = true;
                     }
-                    if menu_item_enabled(ui, "Save Rotation", has_rotation).clicked() {
+                    if menu_item_enabled(ui, "Save Rotation (Ctrl+S)", has_rotation).clicked() {
                         action = Some(MenuAction::SaveRotation);
+                        should_close = true;
+                    }
+                    if menu_item_enabled(ui, "Save As... (Ctrl+Shift+S)", has_file).clicked() {
+                        action = Some(MenuAction::SaveAs);
                         should_close = true;
                     }
 
                     ui.separator();
-                    if menu_item_enabled(ui, "Open Containing Folder", has_file).clicked() {
+                    if menu_item_enabled(ui, "Open Containing Folder (Ctrl+E)", has_file).clicked() {
                         action = Some(MenuAction::OpenContainingFolder);
                         should_close = true;
                     }
@@ -2625,17 +4346,21 @@ impl PhotonioApp {
                     }
 
                     ui.separator();
-                    if menu_item_enabled(ui, "Set as Desktop Wallpaper", has_file).clicked() {
-                        action = Some(MenuAction::SetWallpaper);
+                    if menu_item_enabled(ui, "Rename File... (F2)", has_file).clicked() {
+                        action = Some(MenuAction::Rename);
                         should_close = true;
                     }
                     if menu_item_enabled(ui, "Move to Recycle Bin", has_file).clicked() {
                         action = Some(MenuAction::Delete);
                         should_close = true;
                     }
+                    if menu_item_enabled(ui, "Set as Desktop Wallpaper", has_file).clicked() {
+                        action = Some(MenuAction::SetWallpaper);
+                        should_close = true;
+                    }
 
                     ui.separator();
-                    if menu_item(ui, "Settings...").clicked() {
+                    if menu_item(ui, "Settings... (Ctrl+,)").clicked() {
                         action = Some(MenuAction::Settings);
                         should_close = true;
                     }
@@ -2643,7 +4368,7 @@ impl PhotonioApp {
                         action = Some(MenuAction::About);
                         should_close = true;
                     }
-                    if menu_item(ui, "Help / Shortcuts").clicked() {
+                    if menu_item(ui, "Help / Shortcuts (F1)").clicked() {
                         action = Some(MenuAction::Help);
                         should_close = true;
                     }
@@ -2677,80 +4402,155 @@ impl PhotonioApp {
         if !self.show_help {
             return;
         }
-        let just_opened = std::mem::take(&mut self.help_opened_this_frame);
+        let _ = std::mem::take(&mut self.help_opened_this_frame);
+        let mut open = self.show_help;
         let mut open_about = false;
+        let mut done = false;
         let colors = self.theme();
 
-        let response = egui::Area::new(egui::Id::new("help-overlay"))
+        let modal_frame = egui::Frame::none()
+            .fill(colors.panel_fill)
+            .stroke(egui::Stroke::new(1.0_f32, colors.border))
+            .rounding(10.0)
+            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+            .shadow(egui::Shadow {
+                offset: egui::vec2(0.0, 4.0),
+                blur: 18.0,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(150),
+            });
+
+        egui::Window::new(
+            egui::RichText::new(format!("{}  Help & Shortcuts", icons::ICON_INFO)).size(13.0),
+        )
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(egui::vec2(550.0, 500.0))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .order(egui::Order::Foreground)
+            .frame(modal_frame)
             .show(ctx, |ui| {
-                colors.panel(ui, |ui| {
-                    ui.set_min_width(320.0);
-                    ui.heading("Shortcuts");
-                    ui.separator();
-
-                    let rows: &[(&str, &str)] = &[
-                        ("Previous / Next", "← → / A D / Wheel"),
-                        ("Toggle Grid / Viewer mode", "Enter"),
-                        ("Zoom in / out", "Ctrl + Wheel"),
-                        ("Fit to window", "0"),
-                        ("Actual size (100%)", "1"),
-                        ("Pan", "Left-drag (when zoomed)"),
-                        ("Rotate 90° CW", "R"),
-                        ("Resize image", "Ctrl + Shift + R"),
-                        ("Toggle filmstrip", "T"),
-                        ("Image properties / info", "I"),
-                        ("Play / Pause animation", "Space"),
-                        ("Copy path", "Ctrl + C"),
-                        ("Copy image", "Ctrl + Shift + C"),
-                        ("Save image as…", "Ctrl + S"),
-                        ("Print…", "Ctrl + P"),
-                        ("Open file", "Ctrl + O"),
-                        ("Open folder", "Ctrl + Shift + O"),
-                        ("Close image", "Ctrl + W"),
-                        ("Close folder", "Ctrl + Shift + W"),
-                        ("Show in Explorer", "Ctrl + E"),
-                        ("Settings", "Ctrl + ,"),
-                        ("Move to Recycle Bin", "Del"),
-                        ("Toggle fullscreen", "F11 / Alt+Enter"),
-                        ("Close this help", "Esc / H / F1"),
-                    ];
-
-                    egui::Grid::new("shortcut-grid")
-                        .num_columns(2)
-                        .spacing(egui::vec2(24.0, 6.0))
-                        .show(ui, |ui| {
-                            for (action, keys) in rows {
-                                ui.label(*action);
-                                ui.label(egui::RichText::new(*keys).monospace());
-                                ui.end_row();
-                            }
+                egui::ScrollArea::vertical()
+                    .id_source("help-scroll")
+                    .max_height(420.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        settings_card(ui, &colors, Some("Navigation & Browsing"), |ui| {
+                            shortcut_table(
+                                "help-grid-nav",
+                                ui,
+                                &colors,
+                                &[
+                                    ("Previous / Next image", "←  →  /  A  D  /  Wheel"),
+                                    ("First / Last image", "Home  /  End"),
+                                    ("Toggle Multi-View Grid", "Enter  /  Double-click"),
+                                    ("Focus address bar", "Ctrl + L"),
+                                    ("Go to parent folder", "Backspace  /  Alt + ↑"),
+                                    ("Folder History: Back", "Alt + ←"),
+                                    ("Folder History: Forward", "Alt + →"),
+                                    ("Preview size: bigger", "Ctrl + Wheel Up  /  Ctrl + +"),
+                                    ("Preview size: smaller", "Ctrl + Wheel Down  /  Ctrl + −"),
+                                    ("Preview size: reset", "Ctrl + 0"),
+                                    ("Refresh folder", "F5"),
+                                ],
+                            );
                         });
+                        ui.add_space(8.0);
 
-                    ui.separator();
-                    if ui.button("About Photonio").clicked() {
+                        settings_card(ui, &colors, Some("Viewing & Zoom"), |ui| {
+                            shortcut_table(
+                                "help-grid-zoom",
+                                ui,
+                                &colors,
+                                &[
+                                    ("Zoom in / out", "Ctrl + Wheel"),
+                                    ("Fit to window", "0"),
+                                    ("Actual size (100%)", "1"),
+                                    ("Pan (when zoomed)", "Left-drag"),
+                                    ("Rotate 90° clockwise", "R"),
+                                    ("Rotate 90° counter-clockwise", "Ctrl + R"),
+                                    ("Toggle filmstrip", "T"),
+                                    ("Toggle fullscreen", "F11  /  Alt + Enter"),
+                                ],
+                            );
+                        });
+                        ui.add_space(8.0);
+
+                        settings_card(ui, &colors, Some("File Operations & Tools"), |ui| {
+                            shortcut_table(
+                                "help-grid-file",
+                                ui,
+                                &colors,
+                                &[
+                                    ("Image properties / EXIF", "I"),
+                                    ("Resize image", "Ctrl + Shift + R"),
+                                    ("Rename file", "F2"),
+                                    ("Copy file path", "Ctrl + C"),
+                                    ("Copy image to clipboard", "Ctrl + Shift + C"),
+                                    ("Save rotation", "Ctrl + S"),
+                                    ("Save image as…", "Ctrl + Shift + S"),
+                                    ("Print image…", "Ctrl + P"),
+                                    ("Move to Recycle Bin", "Del"),
+                                    ("Show in File Explorer", "Ctrl + E"),
+                                ],
+                            );
+                        });
+                        ui.add_space(8.0);
+
+                        settings_card(ui, &colors, Some("General & Playback"), |ui| {
+                            shortcut_table(
+                                "help-grid-general",
+                                ui,
+                                &colors,
+                                &[
+                                    ("Open file", "Ctrl + O"),
+                                    ("Open folder", "Ctrl + Shift + O"),
+                                    ("Close image", "Ctrl + W"),
+                                    ("Close folder", "Ctrl + Shift + W"),
+                                    ("Play / Pause animation", "Space"),
+                                    ("Step animation frame", "[  /  ]"),
+                                    ("Settings", "Ctrl + ,"),
+                                    ("Help & Shortcuts", "F1  /  H"),
+                                    ("Close / Dismiss", "Esc"),
+                                ],
+                            );
+                        });
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if colors
+                        .button_secondary(
+                            ui,
+                            &format!("{}  About Photonio", icons::ICON_INFO),
+                            egui::vec2(130.0, 24.0),
+                            true,
+                        )
+                        .clicked()
+                    {
                         open_about = true;
                     }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if colors
+                            .button_primary(ui, "Done", egui::vec2(80.0, 24.0), true)
+                            .clicked()
+                        {
+                            done = true;
+                        }
+                    });
                 });
             });
 
+        self.show_help = open;
+        if done {
+            self.show_help = false;
+        }
         if open_about {
             self.open_about();
-        }
-
-        if !just_opened {
-            let rect = response.response.rect;
-            let clicked_outside = ctx.input(|i| {
-                (i.pointer.primary_clicked() || i.pointer.secondary_clicked())
-                    && i
-                        .pointer
-                        .interact_pos()
-                        .map_or(true, |p| !rect.expand(2.0).contains(p))
-            });
-            if clicked_outside {
-                self.show_help = false;
-            }
         }
     }
 
@@ -2787,18 +4587,24 @@ impl PhotonioApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .fixed_size(egui::vec2(620.0, 420.0))
+            .fixed_size(egui::vec2(620.0, 465.0))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .frame(modal_frame)
             .show(ctx, |ui| {
-                // Enforce total inner bounds so content can never balloon.
-                ui.set_min_size(egui::vec2(600.0, 370.0));
-                ui.set_max_size(egui::vec2(600.0, 370.0));
+                // Enforce total inner bounds so content can never balloon or clip.
+                let inner_size = egui::vec2(600.0, 410.0);
+                ui.set_min_size(inner_size);
+                ui.set_max_size(inner_size);
+
+                let footer_height = 36.0;
+                let separator_height = 9.0;
+                let content_height = inner_size.y - footer_height - separator_height;
 
                 ui.horizontal_top(|ui| {
                     // Left navigation sidebar rail (fixed width).
                     ui.vertical(|ui| {
                         ui.set_width(140.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
                         let tabs = [
                             (SettingsTab::Appearance, icons::ICON_PALETTE, "Appearance"),
                             (SettingsTab::Filmstrip, icons::ICON_FILMSTRIP, "Filmstrip"),
@@ -2807,11 +4613,13 @@ impl PhotonioApp {
                             (SettingsTab::Integration, icons::ICON_PUZZLE, "Integration"),
                         ];
                         for (tab, icon, label) in tabs {
-                            let text = format!(" {icon} {label}");
                             let selected = self.settings_tab == tab;
-                            let response = ui.add_sized(
-                                [135.0, 28.0],
-                                egui::SelectableLabel::new(selected, text),
+                            let response = colors.sidebar_tab(
+                                ui,
+                                icon,
+                                label,
+                                selected,
+                                egui::vec2(135.0, 30.0),
                             );
                             if response.clicked() {
                                 self.settings_tab = tab;
@@ -2825,21 +4633,23 @@ impl PhotonioApp {
                     // Right content pane: scrollable, strictly top-down.
                     egui::ScrollArea::vertical()
                         .id_source("settings-content")
-                        .max_height(320.0)
+                        .max_height(content_height)
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                 match self.settings_tab {
                                     SettingsTab::Appearance => {
-                                        changed |= self.settings_appearance(ui);
+                                        changed |= self.settings_appearance(ui, &colors);
                                     }
                                     SettingsTab::Filmstrip => {
-                                        changed |= self.settings_filmstrip(ui);
+                                        changed |= self.settings_filmstrip(ui, &colors);
                                     }
                                     SettingsTab::QuickPills => {
-                                        changed |= self.settings_quick_pills(ui);
+                                        changed |= self.settings_quick_pills(ui, &colors);
                                     }
                                     SettingsTab::Behavior => {
-                                        changed |= self.settings_behavior(ui);
+                                        changed |= self.settings_behavior(ui, &colors);
                                     }
                                     SettingsTab::Integration => {
                                         let (reg, folder, clean, apps) =
@@ -2861,11 +4671,24 @@ impl PhotonioApp {
                     egui::vec2(ui.available_width(), 36.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        if ui.button("Reset to Defaults").clicked() {
+                        let reset_btn = colors.button_secondary(
+                            ui,
+                            format!("{} Reset to Defaults", icons::ICON_TRASH),
+                            egui::vec2(150.0, 28.0),
+                            true,
+                        );
+                        if reset_btn.clicked() {
                             reset_clicked = true;
                         }
+
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Done").clicked() {
+                            let done_btn = colors.button_primary(
+                                ui,
+                                format!("{} Done", icons::ICON_CHECK),
+                                egui::vec2(95.0, 28.0),
+                                true,
+                            );
+                            if done_btn.clicked() {
                                 done_clicked = true;
                             }
                         });
@@ -2908,43 +4731,60 @@ impl PhotonioApp {
         let file = self.config.last_file_path.clone();
         let pos = self.config.window_pos;
         let size = self.config.window_size;
+        let launch_count = self.config.launch_count;
         self.config = config::Config::default();
         self.config.last_directory = dir;
         self.config.last_file_path = file;
         self.config.window_pos = pos;
         self.config.window_size = size;
+        self.config.launch_count = launch_count;
         self.save_config();
         self.show_success("Settings reset to defaults");
     }
 
     /// Settings → Appearance: theme, backdrop, glass tint, HUD, overlay fade.
-    fn settings_appearance(&mut self, ui: &mut egui::Ui) -> bool {
+    fn settings_appearance(&mut self, ui: &mut egui::Ui, colors: &theme::ThemeColors) -> bool {
         let mut changed = false;
 
         // Card 1: Theme & Background.
-        settings_card(ui, |ui| {
-            ui.label(egui::RichText::new("Theme & Background").strong());
+        settings_card(ui, colors, Some("Theme & Background"), |ui| {
             let mut light = self.config.canvas_background == config::CanvasBackground::Light;
             let mut glass = self.config.canvas_background == config::CanvasBackground::Glass;
 
-            ui.horizontal(|ui| {
-                ui.label("Theme:");
-                ui.radio_value(&mut light, false, "Dark");
-                ui.radio_value(&mut light, true, "Light");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Canvas Background:");
-                ui.add_enabled_ui(!light, |ui| {
-                    ui.radio_value(&mut glass, true, "Translucent Glass");
-                    ui.radio_value(&mut glass, false, "Solid Color");
+            egui::Grid::new("appearance_theme_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label("Theme:");
+                    ui.horizontal(|ui| {
+                        if colors.segmented_value(ui, &mut light, false, "Dark").clicked() {
+                            changed = true;
+                        }
+                        if colors.segmented_value(ui, &mut light, true, "Light").clicked() {
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Canvas Background:");
+                    ui.add_enabled_ui(!light, |ui| {
+                        ui.horizontal(|ui| {
+                            if colors.segmented_value(ui, &mut glass, true, "Translucent Glass").clicked() {
+                                changed = true;
+                            }
+                            if colors.segmented_value(ui, &mut glass, false, "Solid Color").clicked() {
+                                changed = true;
+                            }
+                        });
+                    });
+                    ui.end_row();
+
+                    ui.label("Glass Opacity:");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.config.glass_opacity, 100..=255))
+                        .changed();
+                    ui.end_row();
                 });
-            });
-            ui.horizontal(|ui| {
-                ui.label("Glass Opacity:");
-                changed |= ui
-                    .add(egui::Slider::new(&mut self.config.glass_opacity, 100..=255))
-                    .changed();
-            });
 
             // Commit the two toggles to the single backdrop enum.
             let background = background_from(light, glass);
@@ -2956,25 +4796,33 @@ impl PhotonioApp {
         ui.add_space(6.0);
 
         // Card 2: Screen Overlays.
-        settings_card(ui, |ui| {
-            ui.label(egui::RichText::new("Screen Overlays").strong());
-            ui.horizontal(|ui| {
-                ui.label("Navigation HUD:");
-                changed |= ui
-                    .radio_value(&mut self.config.hud_position, config::HudPosition::Bottom, "Bottom")
-                    .changed();
-                changed |= ui
-                    .radio_value(&mut self.config.hud_position, config::HudPosition::Top, "Top")
-                    .changed();
-                changed |= ui
-                    .radio_value(&mut self.config.hud_position, config::HudPosition::Hidden, "Hidden")
-                    .changed();
-            });
+        settings_card(ui, colors, Some("Screen Overlays"), |ui| {
+            egui::Grid::new("appearance_overlays_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label("Navigation HUD:");
+                    ui.horizontal(|ui| {
+                        if colors.segmented_value(ui, &mut self.config.hud_position, config::HudPosition::Bottom, "Bottom").clicked() {
+                            changed = true;
+                        }
+                        if colors.segmented_value(ui, &mut self.config.hud_position, config::HudPosition::Top, "Top").clicked() {
+                            changed = true;
+                        }
+                        if colors.segmented_value(ui, &mut self.config.hud_position, config::HudPosition::Hidden, "Hidden").clicked() {
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
             changed |= ui
                 .checkbox(&mut self.config.auto_fade_overlays, "Auto-fade overlays when idle")
                 .changed();
             if self.config.auto_fade_overlays {
                 ui.horizontal(|ui| {
+                    ui.add_space(16.0);
                     ui.label("Fade delay:");
                     changed |= ui
                         .add(egui::Slider::new(&mut self.config.fade_delay_secs, 1..=10).suffix(" s"))
@@ -2986,130 +4834,191 @@ impl PhotonioApp {
     }
 
     /// Settings → Filmstrip: master toggle, dock, and thumbnail count.
-    fn settings_filmstrip(&mut self, ui: &mut egui::Ui) -> bool {
+    fn settings_filmstrip(&mut self, ui: &mut egui::Ui, colors: &theme::ThemeColors) -> bool {
         let mut changed = false;
 
         // Card 1: master toggle.
-        settings_card(ui, |ui| {
+        settings_card(ui, colors, Some("Thumbnail Filmstrip"), |ui| {
             changed |= ui
                 .checkbox(&mut self.config.show_filmstrip, "Show Thumbnail Filmstrip (T)")
                 .changed();
         });
         ui.add_space(6.0);
 
-        // Card 2: indented options (disabled when the filmstrip is off).
-        settings_card(ui, |ui| {
+        // Card 2: Layout & Options (enabled when the filmstrip is on).
+        settings_card(ui, colors, Some("Layout & Capacity"), |ui| {
             ui.add_enabled_ui(self.config.show_filmstrip, |ui| {
-                ui.indent("filmstrip_options", |ui| {
-                    ui.label("Dock position:");
-                    changed |= ui
-                        .radio_value(&mut self.config.filmstrip_position, config::FilmstripPosition::Bottom, "Bottom")
-                        .changed();
-                    changed |= ui
-                        .radio_value(&mut self.config.filmstrip_position, config::FilmstripPosition::Top, "Top")
-                        .changed();
-                    changed |= ui
-                        .radio_value(&mut self.config.filmstrip_position, config::FilmstripPosition::Left, "Left")
-                        .changed();
-                    changed |= ui
-                        .radio_value(&mut self.config.filmstrip_position, config::FilmstripPosition::Right, "Right")
-                        .changed();
-                    ui.label("Visible Thumbnails:");
-                    ui.horizontal(|ui| {
-                        for &count in &[7usize, 9, 11] {
-                            if ui
-                                .selectable_value(&mut self.config.filmstrip_count, count, count.to_string())
-                                .changed()
-                            {
+                egui::Grid::new("filmstrip_layout_grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(16.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.label("Dock position:");
+                        ui.horizontal(|ui| {
+                            if colors.segmented_value(ui, &mut self.config.filmstrip_position, config::FilmstripPosition::Bottom, "Bottom").clicked() {
                                 changed = true;
                             }
-                        }
+                            if colors.segmented_value(ui, &mut self.config.filmstrip_position, config::FilmstripPosition::Top, "Top").clicked() {
+                                changed = true;
+                            }
+                            if colors.segmented_value(ui, &mut self.config.filmstrip_position, config::FilmstripPosition::Left, "Left").clicked() {
+                                changed = true;
+                            }
+                            if colors.segmented_value(ui, &mut self.config.filmstrip_position, config::FilmstripPosition::Right, "Right").clicked() {
+                                changed = true;
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("Visible Thumbnails:");
+                        ui.horizontal(|ui| {
+                            for &count in &[7usize, 9, 11] {
+                                if colors.segmented_value(ui, &mut self.config.filmstrip_count, count, &count.to_string()).clicked() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
                     });
-                });
             });
         });
         changed
     }
 
     /// Settings → Quick-Pills: master toggle, layout, and per-button visibility.
-    fn settings_quick_pills(&mut self, ui: &mut egui::Ui) -> bool {
+    fn settings_quick_pills(&mut self, ui: &mut egui::Ui, colors: &theme::ThemeColors) -> bool {
         let mut changed = false;
 
         // Card 1: master toggle.
-        settings_card(ui, |ui| {
+        settings_card(ui, colors, Some("Quick-Action Pill"), |ui| {
             changed |= ui
                 .checkbox(&mut self.config.quick_pill_enabled, "Enable Top-Right Quick-Action Pill")
                 .changed();
         });
         ui.add_space(6.0);
 
-        // Card 2: indented options (disabled when the pill is off).
-        settings_card(ui, |ui| {
+        // Card 2: Layout & button selection.
+        settings_card(ui, colors, Some("Layout & Visible Buttons"), |ui| {
             ui.add_enabled_ui(self.config.quick_pill_enabled, |ui| {
-                ui.indent("quick_pill_options", |ui| {
-                    ui.label("Layout:");
-                    ui.horizontal(|ui| {
-                        changed |= ui
-                            .radio_value(&mut self.config.quick_pill_orientation, config::Orientation::Horizontal, "Horizontal")
-                            .changed();
-                        changed |= ui
-                            .radio_value(&mut self.config.quick_pill_orientation, config::Orientation::Vertical, "Vertical")
-                            .changed();
-                    });
-                    ui.label("Buttons:");
-                    egui::Grid::new("quick_pill_buttons_grid")
-                        .num_columns(2)
-                        .spacing(egui::vec2(14.0, 2.0))
-                        .show(ui, |ui| {
-                            changed |= ui.checkbox(&mut self.config.pill_open_file, "Open File").changed();
-                            changed |= ui.checkbox(&mut self.config.pill_open_folder, "Open Folder").changed();
-                            ui.end_row();
-                            changed |= ui.checkbox(&mut self.config.pill_save_as, "Save As...").changed();
-                            changed |= ui.checkbox(&mut self.config.pill_print, "Print...").changed();
-                            ui.end_row();
-                            changed |= ui.checkbox(&mut self.config.pill_share, "Share...").changed();
-                            changed |= ui.checkbox(&mut self.config.pill_filmstrip, "Toggle Filmstrip").changed();
-                            ui.end_row();
+                egui::Grid::new("quick_pill_orientation_grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(16.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.label("Orientation:");
+                        ui.horizontal(|ui| {
+                            if colors.segmented_value(ui, &mut self.config.quick_pill_orientation, config::Orientation::Horizontal, "Horizontal").clicked() {
+                                changed = true;
+                            }
+                            if colors.segmented_value(ui, &mut self.config.quick_pill_orientation, config::Orientation::Vertical, "Vertical").clicked() {
+                                changed = true;
+                            }
                         });
-                });
+                        ui.end_row();
+                    });
+
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Action Buttons:").size(12.0).color(colors.muted));
+                egui::Grid::new("quick_pill_buttons_grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(24.0, 6.0))
+                    .show(ui, |ui| {
+                        changed |= ui.checkbox(&mut self.config.pill_open_file, "Open File").changed();
+                        changed |= ui.checkbox(&mut self.config.pill_open_folder, "Open Folder").changed();
+                        ui.end_row();
+                        changed |= ui.checkbox(&mut self.config.pill_save_as, "Save As...").changed();
+                        changed |= ui.checkbox(&mut self.config.pill_print, "Print...").changed();
+                        ui.end_row();
+                        changed |= ui.checkbox(&mut self.config.pill_share, "Share...").changed();
+                        changed |= ui.checkbox(&mut self.config.pill_filmstrip, "Toggle Filmstrip").changed();
+                        ui.end_row();
+                    });
             });
         });
         changed
     }
 
     /// Settings → Behavior: wheel action and startup/browsing options.
-    fn settings_behavior(&mut self, ui: &mut egui::Ui) -> bool {
+    fn settings_behavior(&mut self, ui: &mut egui::Ui, colors: &theme::ThemeColors) -> bool {
         let mut changed = false;
 
-        // Card 1: mouse wheel action.
-        settings_card(ui, |ui| {
-            ui.label("Mouse Wheel:");
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .radio_value(&mut self.config.mouse_wheel_action, config::MouseWheelAction::Navigate, "Next / Previous Image")
-                    .changed();
-                changed |= ui
-                    .radio_value(&mut self.config.mouse_wheel_action, config::MouseWheelAction::Zoom, "Zoom In / Out")
-                    .changed();
-            });
+        // Card 1: Navigation & Input.
+        settings_card(ui, colors, Some("Navigation & Input"), |ui| {
+            egui::Grid::new("behavior_input_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label("Mouse Wheel:");
+                    ui.horizontal(|ui| {
+                        if colors
+                            .segmented_value(
+                                ui,
+                                &mut self.config.mouse_wheel_action,
+                                config::MouseWheelAction::Navigate,
+                                "Next / Previous Image",
+                            )
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                        if colors
+                            .segmented_value(
+                                ui,
+                                &mut self.config.mouse_wheel_action,
+                                config::MouseWheelAction::Zoom,
+                                "Zoom In / Out",
+                            )
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            changed |= ui
+                .checkbox(
+                    &mut self.config.loop_navigation,
+                    "Loop navigation at folder boundary",
+                )
+                .changed();
         });
         ui.add_space(6.0);
 
-        // Card 2: startup & browsing.
-        settings_card(ui, |ui| {
+        // Card 2: Startup & Window.
+        settings_card(ui, colors, Some("Startup & Window"), |ui| {
             changed |= ui
-                .checkbox(&mut self.config.remember_last_folder, "Remember last viewed image and folder on startup")
+                .checkbox(
+                    &mut self.config.remember_last_folder,
+                    "Remember last viewed image and folder on startup",
+                )
                 .changed();
-            changed |= ui
-                .checkbox(&mut self.config.loop_navigation, "Loop navigation at folder boundary")
-                .changed();
-        });
-        ui.add_space(6.0);
-
-        // Card 3: fullscreen.
-        settings_card(ui, |ui| {
             changed |= ui
                 .checkbox(&mut self.config.start_fullscreen, "Start in Fullscreen")
+                .changed();
+        });
+        ui.add_space(6.0);
+
+        // Card 3: Multi-View & Navigation.
+        settings_card(ui, colors, Some("Multi-View & Grid Navigation"), |ui| {
+            let mut show_folders = self.config.multiview_show_folders;
+            if ui
+                .checkbox(
+                    &mut show_folders,
+                    "View folders on multi-view",
+                )
+                .on_hover_text("Show subfolders with 4-image quad previews inside the multi-view grid")
+                .changed()
+            {
+                self.config.multiview_show_folders = show_folders;
+                changed = true;
+                self.refresh_multiview_subfolders(ui.ctx());
+            }
+
+            changed |= ui
+                .checkbox(
+                    &mut self.config.adjustable_grid_tile_size,
+                    "Allow Ctrl + Wheel to adjust preview grid tile size",
+                )
                 .changed();
         });
         changed
@@ -3131,10 +5040,8 @@ impl PhotonioApp {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
 
-        // Card 1: default app handler.
-        settings_card(ui, |ui| {
-            ui.label(egui::RichText::new("Default App Handler").strong());
-            ui.add_space(4.0);
+        // Card 1: Default App Handler.
+        settings_card(ui, colors, Some("Default App Handler"), |ui| {
             if checking {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
@@ -3164,23 +5071,38 @@ impl PhotonioApp {
                     }
                 }
             }
-            ui.label(format!("Executable: {current_exe}"));
-            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!("Executable: {current_exe}"))
+                    .size(11.0)
+                    .color(colors.muted),
+            );
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Register as Default App Handler").clicked() {
+                let reg_btn = colors.button_primary(
+                    ui,
+                    format!("{} Register as Default App", icons::ICON_CHECK),
+                    egui::vec2(0.0, 26.0),
+                    !checking,
+                );
+                if reg_btn.clicked() {
                     register_clicked = true;
                 }
-                if ui.button("Open Windows Default Apps").clicked() {
+
+                let apps_btn = colors.button_secondary(
+                    ui,
+                    format!("{} Windows Default Apps", icons::ICON_GEAR),
+                    egui::vec2(0.0, 26.0),
+                    true,
+                );
+                if apps_btn.clicked() {
                     open_default_apps_clicked = true;
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(5.0);
 
-        // Card 2: Explorer context menu.
-        settings_card(ui, |ui| {
-            ui.label(egui::RichText::new("Explorer Context Menu").strong());
-            ui.add_space(4.0);
+        // Card 2: Explorer Context Menu.
+        settings_card(ui, colors, Some("Explorer Context Menu"), |ui| {
             if checking {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
@@ -3188,10 +5110,17 @@ impl PhotonioApp {
                 });
             } else if self.folder_menu_registered {
                 ui.label(
-                    egui::RichText::new(format!("{} Active", icons::ICON_CHECK))
+                    egui::RichText::new(format!("{} Active in Explorer folder context menu", icons::ICON_CHECK))
                         .color(SUCCESS_COLOR),
                 );
-                if ui.button("Remove 'Open folder with Photonio'").clicked() {
+                ui.add_space(4.0);
+                let remove_btn = colors.button_secondary(
+                    ui,
+                    format!("{} Remove from Context Menu", icons::ICON_XMARK),
+                    egui::vec2(0.0, 26.0),
+                    !checking,
+                );
+                if remove_btn.clicked() {
                     folder_menu_clicked = true;
                 }
             } else {
@@ -3199,22 +5128,36 @@ impl PhotonioApp {
                     egui::RichText::new(format!("{} Not in folder context menu", icons::ICON_CIRCLE))
                         .color(colors.muted),
                 );
-                if ui.button("Add 'Open folder with Photonio'").clicked() {
+                ui.add_space(4.0);
+                let add_btn = colors.button_primary(
+                    ui,
+                    format!("{} Add 'Open folder with Photonio'", icons::ICON_PLUS),
+                    egui::vec2(0.0, 26.0),
+                    !checking,
+                );
+                if add_btn.clicked() {
                     folder_menu_clicked = true;
                 }
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(5.0);
 
-        // Card 3: clean purge (danger).
-        settings_card(ui, |ui| {
-            ui.label(egui::RichText::new("Clean Purge").strong());
-            ui.add_space(4.0);
-            ui.label("Remove every registry entry Photonio has written.");
-            let danger = egui::Button::new(
-                egui::RichText::new("Unregister & Clean Registry").color(ERROR_COLOR),
+        // Card 3: Clean Purge (Danger zone).
+        settings_card(ui, colors, Some("Clean Purge"), |ui| {
+            ui.label(
+                egui::RichText::new("Remove every registry entry and file association Photonio has written.")
+                    .size(11.5)
+                    .color(colors.muted),
             );
-            if ui.add(danger).clicked() {
+            ui.add_space(4.0);
+            let danger_btn = colors.button_accent(
+                ui,
+                format!("{} Unregister & Clean Registry", icons::ICON_TRASH),
+                egui::vec2(0.0, 26.0),
+                true,
+                ERROR_COLOR,
+            );
+            if danger_btn.clicked() {
                 clean_clicked = true;
             }
         });
@@ -3400,7 +5343,7 @@ impl PhotonioApp {
             .fill(colors.panel_fill)
             .stroke(egui::Stroke::new(1.0_f32, colors.border))
             .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
             .shadow(egui::Shadow {
                 offset: egui::vec2(0.0, 4.0),
                 blur: 18.0,
@@ -3408,80 +5351,120 @@ impl PhotonioApp {
                 color: egui::Color32::from_black_alpha(150),
             });
 
-        egui::Window::new(format!("{}  Image Properties", icons::ICON_INFO))
+        egui::Window::new(
+            egui::RichText::new(format!("{}  Image Properties", icons::ICON_INFO)).size(13.0),
+        )
             .open(&mut open)
-            .default_size(egui::vec2(480.0, 480.0))
-            .min_size(egui::vec2(440.0, 400.0))
-            .max_size(egui::vec2(540.0, 600.0))
+            .fixed_size(egui::vec2(540.0, 500.0))
+            .resizable(false)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .frame(modal_frame)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .id_source("image-info-scroll")
+                    .max_height(420.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new("General").strong());
-                        property_grid("image_props_general", ui, &meta.general);
-                        ui.separator();
-
-                        ui.label(egui::RichText::new("File Details").strong());
-                        property_grid("image_props_file", ui, &meta.file_details);
-                        ui.separator();
-
-                        ui.label(egui::RichText::new("EXIF / Camera").strong());
-                        if meta.has_exif {
-                            property_grid("image_props_exif", ui, &meta.exif);
-                        } else {
-                            ui.label(
-                                egui::RichText::new("No EXIF camera metadata embedded")
-                                    .italics()
-                                    .color(colors.muted),
-                            );
-                        }
-                    });
-
-                ui.separator();
-
-                // Pinned footer: file path, folder path, and Close.
-                egui::Frame::group(ui.style())
-                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(egui::Button::new(format!("{} Copy", icons::ICON_COPY)).small())
-                                .clicked()
-                            {
-                                copy_file = true;
-                            }
-                            ui.add(egui::Label::new(&file_path).truncate())
-                                .on_hover_text(&file_path);
+                        settings_card(ui, &colors, Some("General Details"), |ui| {
+                            property_grid("image_props_general", ui, &meta.general, &colors);
                         });
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(format!("{} Open Folder", icons::ICON_OPEN_FOLDER))
-                                        .small(),
+                        ui.add_space(8.0);
+
+                        settings_card(ui, &colors, Some("File Details"), |ui| {
+                            property_grid("image_props_file", ui, &meta.file_details, &colors);
+                        });
+                        ui.add_space(8.0);
+
+                        settings_card(ui, &colors, Some("EXIF / Camera Metadata"), |ui| {
+                            if meta.has_exif {
+                                property_grid("image_props_exif", ui, &meta.exif, &colors);
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("No EXIF camera metadata embedded in this image")
+                                        .italics()
+                                        .size(12.0)
+                                        .color(colors.muted),
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+
+                        settings_card(ui, &colors, Some("Location & Paths"), |ui| {
+                            ui.horizontal(|ui| {
+                                if colors
+                                    .button_secondary(
+                                        ui,
+                                        &format!("{} Copy", icons::ICON_COPY),
+                                        egui::vec2(60.0, 22.0),
+                                        true,
+                                    )
+                                    .on_hover_text("Copy full file path")
+                                    .clicked()
+                                {
+                                    copy_file = true;
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&file_path)
+                                            .size(12.0)
+                                            .color(colors.primary),
+                                    )
+                                    .truncate(),
                                 )
-                                .clicked()
-                            {
-                                open_folder = true;
-                            }
-                            if ui
-                                .add(egui::Button::new(format!("{} Copy", icons::ICON_COPY)).small())
-                                .clicked()
-                            {
-                                copy_folder = true;
-                            }
-                            ui.add(egui::Label::new(&folder_path).truncate())
+                                .on_hover_text(&file_path);
+                            });
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                if colors
+                                    .button_secondary(
+                                        ui,
+                                        &format!("{} Open", icons::ICON_OPEN_FOLDER),
+                                        egui::vec2(60.0, 22.0),
+                                        true,
+                                    )
+                                    .on_hover_text("Open containing folder in File Explorer")
+                                    .clicked()
+                                {
+                                    open_folder = true;
+                                }
+                                if colors
+                                    .button_secondary(
+                                        ui,
+                                        &format!("{} Copy", icons::ICON_COPY),
+                                        egui::vec2(60.0, 22.0),
+                                        true,
+                                    )
+                                    .on_hover_text("Copy folder path")
+                                    .clicked()
+                                {
+                                    copy_folder = true;
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&folder_path)
+                                            .size(12.0)
+                                            .color(colors.muted),
+                                    )
+                                    .truncate(),
+                                )
                                 .on_hover_text(&folder_path);
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Close").clicked() {
-                                done = true;
-                            }
+                            });
                         });
                     });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if colors
+                        .button_primary(ui, "Done", egui::vec2(80.0, 24.0), true)
+                        .clicked()
+                    {
+                        done = true;
+                    }
+                });
             });
 
         self.show_image_info = open;
@@ -3504,6 +5487,150 @@ impl PhotonioApp {
         }
     }
 
+    /// Modal dialog for renaming the active file.
+    fn draw_rename_dialog(&mut self, ctx: &egui::Context) {
+        let colors = self.theme();
+        let Some(state) = &mut self.rename_state else {
+            return;
+        };
+        let orig_name = state
+            .old_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let trimmed = state.new_name.trim().to_string();
+        let validation_error = validate_file_name(&state.new_name, &state.old_path).err();
+        let has_error = validation_error.is_some();
+        let target_path = state.old_path.with_file_name(&trimmed);
+        let is_unsupported_ext = !trimmed.is_empty()
+            && !has_error
+            && !filesystem::is_supported_path(&target_path);
+
+        let mut open = true;
+        let mut should_commit = false;
+        let mut should_cancel = false;
+
+        let modal_frame = egui::Frame::none()
+            .fill(colors.panel_fill)
+            .stroke(egui::Stroke::new(1.0_f32, colors.border))
+            .rounding(10.0)
+            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+            .shadow(egui::Shadow {
+                offset: egui::vec2(0.0, 4.0),
+                blur: 18.0,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(150),
+            });
+
+        egui::Window::new("Rename File")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(egui::vec2(360.0, 140.0))
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .frame(modal_frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(icons::ICON_INFO).color(colors.muted));
+                    ui.label(
+                        egui::RichText::new(format!("Current: {}", orig_name))
+                            .color(colors.muted)
+                            .size(12.0),
+                    );
+                });
+                ui.add_space(6.0);
+
+                let input_fill = if colors.dark_mode {
+                    egui::Color32::from_black_alpha(60)
+                } else {
+                    egui::Color32::from_black_alpha(10)
+                };
+                let frame_stroke = if has_error {
+                    egui::Stroke::new(1.0_f32, ERROR_COLOR)
+                } else {
+                    egui::Stroke::new(1.0_f32, colors.border)
+                };
+
+                egui::Frame::none()
+                    .fill(input_fill)
+                    .stroke(frame_stroke)
+                    .rounding(4.0)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let mut output = egui::TextEdit::singleline(&mut state.new_name)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("New file name")
+                            .text_color(if has_error {
+                                ERROR_COLOR
+                            } else {
+                                colors.primary
+                            })
+                            .show(ui);
+
+                        if state.focus_pending {
+                            output.response.request_focus();
+                            let stem_chars = Path::new(&state.new_name)
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().chars().count())
+                                .unwrap_or_else(|| state.new_name.chars().count());
+                            let range = egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(stem_chars),
+                            );
+                            output.state.cursor.set_char_range(Some(range));
+                            output.state.store(ui.ctx(), output.response.id);
+                            state.focus_pending = false;
+                        }
+                    });
+
+                ui.add_space(4.0);
+                if let Some(err) = &validation_error {
+                    ui.label(egui::RichText::new(err).color(ERROR_COLOR).size(12.0));
+                } else if is_unsupported_ext {
+                    ui.label(
+                        egui::RichText::new("⚠️ Warning: Extension is not a supported image format")
+                            .color(WARN_COLOR)
+                            .size(12.0),
+                    );
+                } else {
+                    ui.label(egui::RichText::new(" ").size(12.0));
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let can_commit = !has_error;
+                        let commit_btn = ui.add_enabled(can_commit, egui::Button::new("Rename"));
+                        let cancel_btn = ui.button("Cancel");
+
+                        if cancel_btn.clicked() {
+                            should_cancel = true;
+                        } else if commit_btn.clicked() && can_commit {
+                            should_commit = true;
+                        }
+                    });
+                });
+
+                // Enter commits if valid, Escape cancels
+                let enter_hit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let esc_hit = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                if esc_hit {
+                    should_cancel = true;
+                } else if enter_hit && !has_error {
+                    should_commit = true;
+                }
+            });
+
+        if !open || should_cancel {
+            self.rename_state = None;
+        } else if should_commit {
+            self.commit_rename(&trimmed, ctx);
+        }
+    }
+
     fn execute_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
         match action {
             MenuAction::OpenFile => self.open_file_dialog(ctx),
@@ -3511,7 +5638,8 @@ impl PhotonioApp {
             MenuAction::CloseImage => self.close_current_file(ctx),
             MenuAction::CloseFolder => self.close_folder(),
             MenuAction::ResizeImage => self.open_resize_dialog(),
-            MenuAction::SaveRotation => self.save_rotation(ctx),
+            MenuAction::SaveRotation => self.save_rotation_overwrite(ctx),
+            MenuAction::SaveAs => self.save_current_as(),
             MenuAction::OpenContainingFolder => self.reveal_current(),
             MenuAction::OpenWith => self.open_with_current(),
             MenuAction::CopyFileTo => self.copy_file_to(ctx),
@@ -3519,6 +5647,7 @@ impl PhotonioApp {
             MenuAction::CopyFile => self.copy_current_file(),
             MenuAction::CopyImage => self.copy_current_image(),
             MenuAction::CopyPath => self.copy_current_path(ctx),
+            MenuAction::Rename => self.open_rename_dialog(),
             MenuAction::SetWallpaper => self.set_wallpaper_current(),
             MenuAction::Delete => self.delete_current(ctx),
             MenuAction::Settings => self.open_settings(),
@@ -3529,17 +5658,48 @@ impl PhotonioApp {
     }
 }
 
-/// Render a compact, rounded "card" (grouped frame) for the Settings content.
+/// Render a clean, rounded, consistent "card" (grouped frame) for the Settings content.
+/// Enforces full available width and unified margins/borders across all tabs.
 fn settings_card<R>(
     ui: &mut egui::Ui,
+    colors: &theme::ThemeColors,
+    title: Option<&str>,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-            add_contents(ui)
+) -> R {
+    let frame = egui::Frame::none()
+        .fill(if colors.dark_mode {
+            egui::Color32::from_rgba_unmultiplied(13, 13, 17, 230)
+        } else {
+            egui::Color32::from_black_alpha(8)
         })
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if colors.dark_mode {
+                egui::Color32::from_white_alpha(20)
+            } else {
+                egui::Color32::from_black_alpha(24)
+            },
+        ))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(14.0, 9.0));
+
+    frame.show(ui, |ui| {
+        // Enforce consistent card width across all tabs
+        ui.set_min_width(ui.available_width());
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
+
+        if let Some(t) = title {
+            ui.label(
+                egui::RichText::new(t)
+                    .strong()
+                    .size(13.0)
+                    .color(colors.primary),
+            );
+            ui.add_space(2.0);
+        }
+
+        add_contents(ui)
+    }).inner
 }
 
 /// Map the two Appearance toggles (light theme, glass backdrop) back onto the
@@ -3556,15 +5716,78 @@ fn background_from(light: bool, glass: bool) -> config::CanvasBackground {
 }
 
 /// Render a two-column, striped key/value grid for a metadata section.
-fn property_grid(id: &str, ui: &mut egui::Ui, rows: &[(&'static str, String)]) {
+fn property_grid(
+    id: &str,
+    ui: &mut egui::Ui,
+    rows: &[(&'static str, String)],
+    colors: &theme::ThemeColors,
+) {
     egui::Grid::new(id)
         .striped(true)
-        .spacing([12.0, 6.0])
+        .spacing([16.0, 5.0])
         .num_columns(2)
         .show(ui, |ui| {
             for (key, value) in rows {
-                ui.label(*key);
-                ui.label(value);
+                ui.label(
+                    egui::RichText::new(*key)
+                        .size(12.0)
+                        .color(colors.muted),
+                );
+                ui.label(
+                    egui::RichText::new(value)
+                        .size(12.0)
+                        .color(colors.primary),
+                );
+                ui.end_row();
+            }
+        });
+}
+
+/// Render a clean two-column grid of keyboard shortcuts with <kbd> pill badges.
+fn shortcut_table(
+    id: &str,
+    ui: &mut egui::Ui,
+    colors: &theme::ThemeColors,
+    rows: &[(&str, &str)],
+) {
+    let pill_fill = if colors.dark_mode {
+        egui::Color32::from_white_alpha(14)
+    } else {
+        egui::Color32::from_black_alpha(10)
+    };
+    let pill_stroke = egui::Stroke::new(
+        1.0_f32,
+        if colors.dark_mode {
+            egui::Color32::from_white_alpha(24)
+        } else {
+            egui::Color32::from_black_alpha(20)
+        },
+    );
+
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing(egui::vec2(20.0, 6.0))
+        .show(ui, |ui| {
+            for (action, keys) in rows {
+                ui.label(
+                    egui::RichText::new(*action)
+                        .size(12.5)
+                        .color(colors.primary),
+                );
+
+                egui::Frame::none()
+                    .fill(pill_fill)
+                    .stroke(pill_stroke)
+                    .rounding(4.0)
+                    .inner_margin(egui::Margin::symmetric(7.0, 2.5))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(*keys)
+                                .monospace()
+                                .size(11.5)
+                                .color(colors.primary),
+                        );
+                    });
                 ui.end_row();
             }
         });
@@ -3592,10 +5815,11 @@ fn pill_button(
     glyph: &str,
     tooltip: &str,
     highlighted: bool,
+    highlight_color: egui::Color32,
 ) -> egui::Response {
     let mut text = egui::RichText::new(glyph).size(18.0);
     if highlighted {
-        text = text.color(GIF_COLOR);
+        text = text.color(highlight_color);
     }
     ui.add_sized(
         egui::vec2(32.0, 32.0),
@@ -3603,7 +5827,56 @@ fn pill_button(
             .frame(false)
             .min_size(egui::vec2(32.0, 32.0)),
     )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
     .on_hover_text(tooltip)
+}
+
+/// Compact glyph button for the quick-action pill with a smooth, pulsing breathing
+/// animation effect for high-priority pending actions (like pending rotation save).
+fn pill_button_breathing(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tooltip: &str,
+    _colors: &theme::ThemeColors,
+) -> egui::Response {
+    let time = ui.input(|i| i.time);
+    let wave = (time * 3.5).sin() as f32; // ~1.8 second smooth breath cycle
+    let breath = wave * 0.5 + 0.5; // 0.0 to 1.0 (breath in, breath out)
+
+    // Breathing glow fill and stroke in warm gold/amber - subtle, elegant, low outer glow
+    let fill_alpha = (14.0 + 20.0 * breath) as u8;
+    let stroke_alpha = (30.0 + 40.0 * breath) as u8;
+    let fill = egui::Color32::from_rgba_unmultiplied(255, 195, 45, fill_alpha);
+    let stroke = egui::Stroke::new(
+        1.0_f32,
+        egui::Color32::from_rgba_unmultiplied(255, 205, 55, stroke_alpha),
+    );
+
+    let icon_size = 16.5;
+    let icon_color = egui::Color32::from_rgb(255, (195.0 + 35.0 * breath) as u8, 45);
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+    let painter = ui.painter();
+
+    // Draw breathing rounded card background & stroke
+    painter.rect_filled(rect, 6.0, fill);
+    painter.rect_stroke(rect, 6.0, stroke);
+
+    // Draw centered icon
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(icon_size),
+        icon_color,
+    );
+
+    // Repaint to keep breathing animation smoothly running at 60 FPS
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
 }
 
 /// Fit an image of `dims` (width, height) inside `slot`, preserving its aspect
@@ -3619,6 +5892,35 @@ fn fit_rect_contain(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
         slot.center().y - draw_h * 0.5,
     );
     egui::Rect::from_min_size(min, egui::vec2(draw_w, draw_h))
+}
+
+/// UV rect (0..1) that center-crops `dims` to cover `slot`.
+fn cover_uv(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
+    let img_w = dims[0].max(1) as f32;
+    let img_h = dims[1].max(1) as f32;
+    let scale = (slot.width() / img_w).max(slot.height() / img_h);
+    let fx = (slot.width() / (img_w * scale)).min(1.0);
+    let fy = (slot.height() / (img_h * scale)).min(1.0);
+    egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(fx, fy))
+}
+
+/// Decode + downscale an image to `max_side` for MultiView folder quad previews.
+fn decode_quad_thumb(path: &Path, max_side: u32) -> Option<(Vec<u8>, [usize; 2])> {
+    use std::io::Read;
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut prefix = vec![0u8; 128 * 1024];
+        if let Ok(n) = file.read(&mut prefix) {
+            prefix.truncate(n);
+            if let Some(thumb) = viewer::embedded_thumbnail(&prefix, max_side) {
+                let dims = [thumb.width() as usize, thumb.height() as usize];
+                return Some((thumb.to_rgba8().into_raw(), dims));
+            }
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let thumb = viewer::decode_thumbnail(&bytes, max_side).ok()?;
+    let dims = [thumb.width() as usize, thumb.height() as usize];
+    Some((thumb.to_rgba8().into_raw(), dims))
 }
 
 /// Move a file across filesystems: `rename` first, then copy + delete.
@@ -3712,6 +6014,101 @@ fn format_name(path: &Path) -> String {
     }
 }
 
+/// Validate candidate filename against Windows filesystem rules and collisions.
+fn validate_file_name(name: &str, old_path: &Path) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("File name cannot be empty".to_string());
+    }
+    if trimmed.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        return Err("Name contains invalid characters (< > : \" / \\ | ? *)".to_string());
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err("Name cannot end with a period or space".to_string());
+    }
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        return Err(format!("\"{stem}\" is a reserved Windows device name"));
+    }
+    let orig_name = old_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if orig_name == trimmed {
+        return Ok(trimmed.to_string());
+    }
+    let is_case_change = orig_name.eq_ignore_ascii_case(trimmed);
+    let target = old_path.with_file_name(trimmed);
+    if !is_case_change && target.exists() {
+        return Err(format!("A file named \"{trimmed}\" already exists"));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Rename `old_path` to `new_path` safely on Windows, properly handling case-only changes.
+fn safe_rename(old_path: &Path, new_path: &Path) -> std::io::Result<()> {
+    let old_name = old_path.file_name().unwrap_or_default().to_string_lossy();
+    let new_name = new_path.file_name().unwrap_or_default().to_string_lossy();
+    if old_name == new_name {
+        return Ok(());
+    }
+    if old_name.eq_ignore_ascii_case(&new_name) {
+        // Case-only rename: use a temp name so Windows NTFS updates the casing reliably.
+        let temp_name = format!("{}.{}.photonio_tmp", old_name, std::process::id());
+        let temp_path = old_path.with_file_name(temp_name);
+        std::fs::rename(old_path, &temp_path)?;
+        if let Err(e) = std::fs::rename(&temp_path, new_path) {
+            let _ = std::fs::rename(&temp_path, old_path);
+            return Err(e);
+        }
+        Ok(())
+    } else {
+        std::fs::rename(old_path, new_path)
+    }
+}
+
+/// Move entries from `cache` to their new indices according to file path matches,
+/// optionally remapping an explicitly renamed item (`(old_idx, new_idx)`).
+fn remap_cache_keys_with_rename<T>(
+    cache: &mut HashMap<usize, T>,
+    old_files: &[PathBuf],
+    new_files: &[PathBuf],
+    renamed: Option<(usize, usize)>,
+) -> HashMap<usize, T> {
+    let mut new_cache = HashMap::new();
+    for (new_idx, new_path) in new_files.iter().enumerate() {
+        if let Some((old_renamed_idx, new_renamed_idx)) = renamed {
+            if new_idx == new_renamed_idx {
+                if let Some(val) = cache.remove(&old_renamed_idx) {
+                    new_cache.insert(new_idx, val);
+                    continue;
+                }
+            }
+        }
+        if let Some(old_idx) = old_files.iter().position(|p| p == new_path) {
+            if let Some(val) = cache.remove(&old_idx) {
+                new_cache.insert(new_idx, val);
+            }
+        }
+    }
+    new_cache
+}
+
+/// Move entries from `cache` to their new indices according to file path matches.
+fn remap_cache_keys<T>(
+    cache: &mut HashMap<usize, T>,
+    old_files: &[PathBuf],
+    new_files: &[PathBuf],
+) -> HashMap<usize, T> {
+    remap_cache_keys_with_rename(cache, old_files, new_files, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3741,6 +6138,477 @@ mod tests {
     fn embedded_logo_decodes() {
         assert!(assets::logo_color_image().is_some());
     }
+
+    #[test]
+    fn icon_folder_stretched_layout_and_quad_insets() {
+        let ctx = egui::Context::default();
+        setup_fonts(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+
+        // Test at default grid preview width (thumb_w ~138, thumb_h ~144)
+        let thumb_w = 138.0_f32;
+        let thumb_h = 144.0_f32;
+        let border = 4.0_f32;
+        let avail_w = (thumb_w - border * 2.0).max(10.0);
+        let avail_h = (thumb_h - border * 2.0).max(10.0);
+
+        // Natural visual aspect ratio is 1.0 : 0.82
+        let font_size = avail_w.min(avail_h / 0.82);
+        assert!(font_size > 50.0 && font_size <= avail_w);
+
+        let folder_w = font_size;
+        let folder_h = font_size * 0.82;
+        let thumb_center = egui::pos2(thumb_w * 0.5, thumb_h * 0.5);
+        let folder_rect = egui::Rect::from_center_size(thumb_center, egui::vec2(folder_w, folder_h));
+
+        // Quad insets relative to folder_rect
+        let quad_left = folder_rect.min.x + folder_rect.width() * 0.125;
+        let quad_right = folder_rect.max.x - folder_rect.width() * 0.120;
+        let quad_top = folder_rect.min.y + folder_rect.height() * 0.200;
+        let quad_bottom = folder_rect.max.y - folder_rect.height() * 0.090;
+        let quad_rect = egui::Rect::from_min_max(
+            egui::pos2(quad_left, quad_top),
+            egui::pos2(quad_right, quad_bottom),
+        );
+
+        // Quad must be strictly contained inside the folder bounding box
+        assert!(quad_rect.min.x > folder_rect.min.x);
+        assert!(quad_rect.max.x < folder_rect.max.x);
+        assert!(quad_rect.min.y > folder_rect.min.y);
+        assert!(quad_rect.max.y < folder_rect.max.y);
+        assert!(quad_rect.width() > 0.0);
+        assert!(quad_rect.height() > 0.0);
+
+        // Verify font layout produces expected non-empty galley
+        let galley = ctx.fonts(|f| {
+            f.layout_no_wrap(
+                icons::ICON_FOLDER.to_string(),
+                egui::FontId::proportional(font_size),
+                egui::Color32::WHITE,
+            )
+        });
+        assert!(galley.size().x > 0.0);
+        assert!(galley.size().y > 0.0);
+    }
+
+    #[test]
+    fn remap_cache_keys_preserves_and_relocates_entries() {
+        let old_files = vec![
+            PathBuf::from("C:/pics/img1.png"),
+            PathBuf::from("C:/pics/img2.png"),
+            PathBuf::from("C:/pics/img3.png"),
+        ];
+        // img0 added at start, img2 deleted, img1 shifted 0->1, img3 shifted 2->2
+        let new_files = vec![
+            PathBuf::from("C:/pics/img0.png"),
+            PathBuf::from("C:/pics/img1.png"),
+            PathBuf::from("C:/pics/img3.png"),
+        ];
+        let mut cache = HashMap::new();
+        cache.insert(0, "texture1");
+        cache.insert(1, "texture2");
+        cache.insert(2, "texture3");
+
+        let remapped = remap_cache_keys(&mut cache, &old_files, &new_files);
+        assert_eq!(remapped.get(&0), None);
+        assert_eq!(remapped.get(&1), Some(&"texture1"));
+        assert_eq!(remapped.get(&2), Some(&"texture3"));
+        assert_eq!(remapped.len(), 2);
+    }
+
+    #[test]
+    fn remap_cache_keys_with_rename_tracks_renamed_item() {
+        let old_files = vec![
+            PathBuf::from("C:/pics/alpha.png"),
+            PathBuf::from("C:/pics/beta.png"),
+            PathBuf::from("C:/pics/gamma.png"),
+        ];
+        // beta.png renamed to zulu.png -> moves from index 1 to index 2
+        let new_files = vec![
+            PathBuf::from("C:/pics/alpha.png"),
+            PathBuf::from("C:/pics/gamma.png"),
+            PathBuf::from("C:/pics/zulu.png"),
+        ];
+        let mut cache = HashMap::new();
+        cache.insert(0, "alpha_tex");
+        cache.insert(1, "beta_tex");
+        cache.insert(2, "gamma_tex");
+
+        let remapped =
+            remap_cache_keys_with_rename(&mut cache, &old_files, &new_files, Some((1, 2)));
+        assert_eq!(remapped.get(&0), Some(&"alpha_tex"));
+        assert_eq!(remapped.get(&1), Some(&"gamma_tex"));
+        assert_eq!(remapped.get(&2), Some(&"beta_tex"));
+    }
+
+    #[test]
+    fn validate_file_name_checks_rules() {
+        let original = PathBuf::from("C:/pics/sample.jpg");
+
+        // Empty / whitespace
+        assert!(validate_file_name("", &original).is_err());
+        assert!(validate_file_name("   ", &original).is_err());
+
+        // Invalid characters
+        assert!(validate_file_name("sample?.jpg", &original).is_err());
+        assert!(validate_file_name("sam/ple.jpg", &original).is_err());
+        assert!(validate_file_name("sam\\ple.jpg", &original).is_err());
+        assert!(validate_file_name("sample*.jpg", &original).is_err());
+        assert!(validate_file_name("sam<ple>.jpg", &original).is_err());
+        assert!(validate_file_name("sample:1.jpg", &original).is_err());
+        assert!(validate_file_name("sample|test.jpg", &original).is_err());
+
+        // Trailing dot
+        assert!(validate_file_name("sample.jpg.", &original).is_err());
+
+        // Reserved Windows names
+        assert!(validate_file_name("con.jpg", &original).is_err());
+        assert!(validate_file_name("NUL.png", &original).is_err());
+        assert!(validate_file_name("com1.webp", &original).is_err());
+        assert!(validate_file_name("lpt3.jpg", &original).is_err());
+
+        // Same name
+        assert_eq!(
+            validate_file_name("sample.jpg", &original),
+            Ok("sample.jpg".to_string())
+        );
+        assert_eq!(
+            validate_file_name("  sample.jpg  ", &original),
+            Ok("sample.jpg".to_string())
+        );
+
+        // Valid new name
+        assert_eq!(
+            validate_file_name("vacation_2026.png", &original),
+            Ok("vacation_2026.png".to_string())
+        );
+    }
+
+    #[test]
+    fn compute_feedback_alpha_lifecycle() {
+        // Fade-in phase (0.0s to 0.2s)
+        let alpha_start = compute_feedback_alpha(0.0).unwrap();
+        assert!((alpha_start - 0.0).abs() < 1e-4);
+
+        let alpha_mid_in = compute_feedback_alpha(0.1).unwrap();
+        assert!((alpha_mid_in - 0.5).abs() < 1e-4);
+
+        let alpha_in_done = compute_feedback_alpha(0.2).unwrap();
+        assert!((alpha_in_done - 1.0).abs() < 1e-4);
+
+        // Hold phase (0.2s to 2.5s)
+        let alpha_hold_1 = compute_feedback_alpha(1.0).unwrap();
+        assert!((alpha_hold_1 - 1.0).abs() < 1e-4);
+
+        let alpha_hold_end = compute_feedback_alpha(2.5).unwrap();
+        assert!((alpha_hold_end - 1.0).abs() < 1e-4);
+
+        // Fade-out phase (2.5s to 3.0s)
+        let alpha_mid_out = compute_feedback_alpha(2.75).unwrap();
+        assert!((alpha_mid_out - 0.5).abs() < 1e-4);
+
+        let alpha_near_end = compute_feedback_alpha(2.95).unwrap();
+        assert!((alpha_near_end - 0.1).abs() < 1e-3);
+
+        // Expired (>= 3.0s)
+        assert_eq!(compute_feedback_alpha(3.0), None);
+        assert_eq!(compute_feedback_alpha(3.5), None);
+    }
+
+    #[test]
+    fn folder_history_stack_management() {
+        let mut back_stack: Vec<PathBuf> = Vec::new();
+        let mut forward_stack: Vec<PathBuf> = Vec::new();
+
+        // Helper closures that match PhotonioApp's push/back/forward stack semantics
+        let push_history = |cur: PathBuf, target: PathBuf, back: &mut Vec<PathBuf>, fwd: &mut Vec<PathBuf>| {
+            if cur != target {
+                if back.last() != Some(&cur) {
+                    back.push(cur);
+                    if back.len() > 50 {
+                        back.remove(0);
+                    }
+                }
+                fwd.clear();
+            }
+        };
+
+        let dir1 = PathBuf::from("C:\\photos\\vacation");
+        let dir2 = PathBuf::from("C:\\photos\\work");
+        let dir3 = PathBuf::from("C:\\photos\\family");
+
+        // Navigate 1 -> 2
+        push_history(dir1.clone(), dir2.clone(), &mut back_stack, &mut forward_stack);
+        assert_eq!(back_stack, vec![dir1.clone()]);
+        assert!(forward_stack.is_empty());
+
+        // Consecutive navigation to same target should not duplicate
+        push_history(dir2.clone(), dir2.clone(), &mut back_stack, &mut forward_stack);
+        assert_eq!(back_stack, vec![dir1.clone()]);
+
+        // Navigate 2 -> 3
+        push_history(dir2.clone(), dir3.clone(), &mut back_stack, &mut forward_stack);
+        assert_eq!(back_stack, vec![dir1.clone(), dir2.clone()]);
+        assert!(forward_stack.is_empty());
+
+        // Back: pop dir2, push current dir3 to forward_stack
+        let prev = back_stack.pop().unwrap();
+        assert_eq!(prev, dir2);
+        forward_stack.push(dir3.clone());
+        assert_eq!(back_stack, vec![dir1.clone()]);
+        assert_eq!(forward_stack, vec![dir3.clone()]);
+
+        // Forward: pop dir3, push current dir2 to back_stack
+        let next = forward_stack.pop().unwrap();
+        assert_eq!(next, dir3);
+        back_stack.push(dir2.clone());
+        assert_eq!(back_stack, vec![dir1.clone(), dir2.clone()]);
+        assert!(forward_stack.is_empty());
+
+        // Test capacity cap at 50
+        let mut big_stack = Vec::new();
+        let mut dummy_fwd = Vec::new();
+        for i in 0..60 {
+            push_history(
+                PathBuf::from(format!("C:\\folder_{i}")),
+                PathBuf::from(format!("C:\\folder_{}", i + 1)),
+                &mut big_stack,
+                &mut dummy_fwd,
+            );
+        }
+        assert_eq!(big_stack.len(), 50);
+        assert_eq!(big_stack.first(), Some(&PathBuf::from("C:\\folder_10")));
+        assert_eq!(big_stack.last(), Some(&PathBuf::from("C:\\folder_59")));
+    }
+
+    #[test]
+    fn grid_tile_sizing_and_clamping() {
+        assert_eq!(PhotonioApp::DEFAULT_GRID_TILE_SIZE, 150.0);
+        assert_eq!(PhotonioApp::MIN_GRID_TILE_SIZE, 80.0);
+        assert_eq!(PhotonioApp::MAX_GRID_TILE_SIZE, 500.0);
+
+        // Standard label row height offset
+        let h = PhotonioApp::DEFAULT_GRID_TILE_SIZE + 26.0;
+        assert!((h - 176.0).abs() < 1e-4);
+
+        // Clamping checks
+        let clamped_low = 50.0_f32.clamp(PhotonioApp::MIN_GRID_TILE_SIZE, PhotonioApp::MAX_GRID_TILE_SIZE);
+        assert_eq!(clamped_low, 80.0);
+
+        let clamped_high = 700.0_f32.clamp(PhotonioApp::MIN_GRID_TILE_SIZE, PhotonioApp::MAX_GRID_TILE_SIZE);
+        assert_eq!(clamped_high, 500.0);
+    }
+
+    #[test]
+    fn preview_lod_selection_and_target_sizes() {
+        use crate::loader::PreviewLod;
+
+        assert_eq!(PreviewLod::Small.target_size(), 384);
+        assert_eq!(PreviewLod::Medium.target_size(), 640);
+        assert_eq!(PreviewLod::Large.target_size(), 1024);
+
+        // Standard DPI (1.0x)
+        assert_eq!(PreviewLod::from_tile_width(120.0, 1.0), PreviewLod::Small);
+        assert_eq!(PreviewLod::from_tile_width(200.0, 1.0), PreviewLod::Small);
+        assert_eq!(PreviewLod::from_tile_width(300.0, 1.0), PreviewLod::Medium);
+        assert_eq!(PreviewLod::from_tile_width(500.0, 1.0), PreviewLod::Large);
+
+        // High DPI (1.5x)
+        assert_eq!(PreviewLod::from_tile_width(120.0, 1.5), PreviewLod::Small);
+        assert_eq!(PreviewLod::from_tile_width(200.0, 1.5), PreviewLod::Medium);
+        assert_eq!(PreviewLod::from_tile_width(320.0, 1.5), PreviewLod::Large);
+
+        // Retina / 4K (2.0x)
+        assert_eq!(PreviewLod::from_tile_width(100.0, 2.0), PreviewLod::Small);
+        assert_eq!(PreviewLod::from_tile_width(180.0, 2.0), PreviewLod::Medium);
+        assert_eq!(PreviewLod::from_tile_width(250.0, 2.0), PreviewLod::Large);
+
+        // Ordering allows upgrade comparison (e.g., existing.lod < needed_lod)
+        assert!(PreviewLod::Small < PreviewLod::Medium);
+        assert!(PreviewLod::Medium < PreviewLod::Large);
+    }
+
+    #[test]
+    fn rotation_clockwise_and_counter_clockwise_arithmetic() {
+        let mut rot = 0;
+        // CW: +90 % 360
+        rot = (rot + 90) % 360;
+        assert_eq!(rot, 90);
+        rot = (rot + 90) % 360;
+        assert_eq!(rot, 180);
+        rot = (rot + 90) % 360;
+        assert_eq!(rot, 270);
+        rot = (rot + 90) % 360;
+        assert_eq!(rot, 0);
+
+        // CCW: +270 % 360
+        rot = (rot + 270) % 360;
+        assert_eq!(rot, 270);
+        rot = (rot + 270) % 360;
+        assert_eq!(rot, 180);
+        rot = (rot + 270) % 360;
+        assert_eq!(rot, 90);
+        rot = (rot + 270) % 360;
+        assert_eq!(rot, 0);
+
+        // Mixed CW then CCW brings back to 0
+        rot = (rot + 90) % 360;
+        assert_eq!(rot, 90);
+        rot = (rot + 270) % 360;
+        assert_eq!(rot, 0);
+    }
+
+    #[test]
+    fn shortcut_save_and_save_as_chords() {
+        // Ctrl + S (without Shift): Save / overwrite
+        let ctrl_s = egui::Modifiers {
+            ctrl: true,
+            shift: false,
+            alt: false,
+            command: true,
+            mac_cmd: false,
+        };
+        let is_save = ctrl_s.ctrl && !ctrl_s.shift;
+        let is_save_as = ctrl_s.ctrl && ctrl_s.shift;
+        assert!(is_save);
+        assert!(!is_save_as);
+
+        // Ctrl + Shift + S: Save As...
+        let ctrl_shift_s = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            command: true,
+            mac_cmd: false,
+        };
+        let is_save2 = ctrl_shift_s.ctrl && !ctrl_shift_s.shift;
+        let is_save_as2 = ctrl_shift_s.ctrl && ctrl_shift_s.shift;
+        assert!(!is_save2);
+        assert!(is_save_as2);
+    }
+
+    #[test]
+    fn cover_uv_aspect_calculation() {
+        // Square image into square slot: UV is full (0..1)
+        let slot = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let uv_sq = cover_uv([200, 200], slot);
+        assert!((uv_sq.min.x - 0.0).abs() < 1e-4);
+        assert!((uv_sq.min.y - 0.0).abs() < 1e-4);
+        assert!((uv_sq.max.x - 1.0).abs() < 1e-4);
+        assert!((uv_sq.max.y - 1.0).abs() < 1e-4);
+
+        // Landscape image (2:1) into square slot: height covers (y is 0..1), width is center-cropped (x > 0 and < 1)
+        let uv_land = cover_uv([400, 200], slot);
+        assert!((uv_land.min.y - 0.0).abs() < 1e-4);
+        assert!((uv_land.max.y - 1.0).abs() < 1e-4);
+        assert!(uv_land.min.x > 0.1 && uv_land.min.x < 0.4);
+        assert!(uv_land.max.x > 0.6 && uv_land.max.x < 0.9);
+    }
+
+    #[test]
+    fn multiview_unified_grid_selection_mapping() {
+        let folder_count = 3;
+        let image_count = 5;
+        let total_items = folder_count + image_count;
+        assert_eq!(total_items, 8);
+
+        // Folder indices 0..3
+        for f in 0..folder_count {
+            let selected_folder = Some(f);
+            let unified = match selected_folder {
+                Some(idx) if idx < folder_count => idx,
+                _ => folder_count,
+            };
+            assert_eq!(unified, f);
+            assert!(unified < folder_count);
+        }
+
+        // Image indices 0..5 map to unified indices 3..8
+        for i in 0..image_count {
+            let selected_folder: Option<usize> = None;
+            let current_image_idx = i;
+            let unified = match selected_folder {
+                Some(idx) if idx < folder_count => idx,
+                _ => folder_count + current_image_idx,
+            };
+            assert_eq!(unified, folder_count + i);
+            assert!(unified >= folder_count && unified < total_items);
+        }
+    }
+
+    #[test]
+    fn test_breadcrumbs_short_path_no_ellipsis() {
+        let crumbs = vec![
+            ("C:\\".to_string(), PathBuf::from("C:\\")),
+            ("Photos".to_string(), PathBuf::from("C:\\Photos")),
+        ];
+        let segments = layout_breadcrumbs(&crumbs, 500.0, |t, _| t.chars().count() as f32 * 10.0);
+        assert_eq!(segments.len(), 2);
+        match &segments[0] {
+            BreadcrumbSegment::Crumb { label, is_current, .. } => {
+                assert_eq!(label, "C:\\");
+                assert!(!is_current);
+            }
+            _ => panic!("Expected Crumb"),
+        }
+        match &segments[1] {
+            BreadcrumbSegment::Crumb { label, is_current, .. } => {
+                assert_eq!(label, "Photos");
+                assert!(is_current);
+            }
+            _ => panic!("Expected Crumb"),
+        }
+    }
+
+    #[test]
+    fn test_breadcrumbs_intermediate_collapse_keeps_root_and_trailing() {
+        let crumbs = vec![
+            ("F:\\".to_string(), PathBuf::from("F:\\")),
+            ("Collections".to_string(), PathBuf::from("F:\\Collections")),
+            ("091. Files 3".to_string(), PathBuf::from("F:\\Collections\\091. Files 3")),
+            ("kids on cam".to_string(), PathBuf::from("F:\\Collections\\091. Files 3\\kids on cam")),
+            ("CaptureFiles".to_string(), PathBuf::from("F:\\Collections\\091. Files 3\\kids on cam\\CaptureFiles")),
+            ("2018-04-05".to_string(), PathBuf::from("F:\\Collections\\091. Files 3\\kids on cam\\CaptureFiles\\2018-04-05")),
+        ];
+
+        let segments = layout_breadcrumbs(&crumbs, 260.0, |t, _| t.chars().count() as f32 * 8.0);
+        assert!(segments.len() >= 3);
+        assert!(matches!(&segments[0], BreadcrumbSegment::Crumb { label, .. } if label == "F:\\"));
+        assert!(matches!(&segments[1], BreadcrumbSegment::Ellipsis { hidden } if !hidden.is_empty()));
+        assert!(matches!(segments.last(), Some(BreadcrumbSegment::Crumb { is_current: true, .. })));
+    }
+
+    #[test]
+    fn test_breadcrumbs_tight_space_collapses_to_ellipsis_and_current() {
+        let crumbs = vec![
+            ("F:\\".to_string(), PathBuf::from("F:\\")),
+            ("VeryLongIntermediateFolderNameA".to_string(), PathBuf::from("F:\\A")),
+            ("VeryLongIntermediateFolderNameB".to_string(), PathBuf::from("F:\\A\\B")),
+            ("CurrentActiveFolder".to_string(), PathBuf::from("F:\\A\\B\\CurrentActiveFolder")),
+        ];
+
+        let segments = layout_breadcrumbs(&crumbs, 190.0, |t, _| t.chars().count() as f32 * 7.0);
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(&segments[0], BreadcrumbSegment::Ellipsis { .. }));
+        assert!(matches!(&segments[1], BreadcrumbSegment::Crumb { label, is_current: true, .. } if label == "CurrentActiveFolder"));
+    }
+
+    #[test]
+    fn test_breadcrumbs_narrow_truncates_current() {
+        let crumbs = vec![
+            ("F:\\".to_string(), PathBuf::from("F:\\")),
+            ("ExtremelySuperLongActiveFolderNameExceedingAllBounds".to_string(), PathBuf::from("F:\\Long")),
+        ];
+        let segments = layout_breadcrumbs(&crumbs, 60.0, |t, _| t.chars().count() as f32 * 8.0);
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(&segments[0], BreadcrumbSegment::Ellipsis { .. }));
+        if let BreadcrumbSegment::Crumb { label, is_current, .. } = &segments[1] {
+            assert!(is_current);
+            assert!(label.len() < "ExtremelySuperLongActiveFolderNameExceedingAllBounds".len());
+        } else {
+            panic!("Expected truncated crumb");
+        }
+    }
 }
 
 impl eframe::App for PhotonioApp {
@@ -3754,6 +6622,14 @@ impl eframe::App for PhotonioApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Enforce that egui never zooms the entire page via keyboard shortcuts.
+        if ctx.options(|o| o.zoom_with_keyboard) {
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        }
+        if (ctx.zoom_factor() - 1.0).abs() > f32::EPSILON {
+            ctx.set_zoom_factor(1.0);
+        }
+
         // Keep global widget visuals in sync with the backdrop theme.
         if ctx.style().visuals.dark_mode != self.is_dark_theme() {
             apply_global_visuals(ctx, self.is_dark_theme());
@@ -3761,7 +6637,9 @@ impl eframe::App for PhotonioApp {
 
         self.ingest_drops(ctx);
         self.poll_loader(ctx);
+        self.poll_subfolders(ctx);
         self.poll_registry();
+        self.poll_refresh(ctx);
         // Retry visible-but-missing thumbnails every frame (Viewer filmstrip;
         // the grid requests its own visible tiles inside `draw_grid_view`).
         if self.view_mode == ViewMode::Viewer {
@@ -3787,6 +6665,7 @@ impl eframe::App for PhotonioApp {
             input.reset_fit = false;
             input.reset_100 = false;
             input.rotate = false;
+            input.rotate_ccw = false;
             input.delete = false;
             input.help = false;
             input.toggle_filmstrip = false;
@@ -3794,6 +6673,10 @@ impl eframe::App for PhotonioApp {
             input.step_back = false;
             input.step_forward = false;
             input.toggle_image_info = false;
+            input.refresh_folder = false;
+            input.rename = false;
+            input.save = false;
+            input.save_as = false;
         }
 
         // Reset the overlay auto-fade timer on any user interaction.
@@ -3817,6 +6700,14 @@ impl eframe::App for PhotonioApp {
         let mut viewer_navigate: isize = 0;
         if self.view_mode == ViewMode::Grid {
             let cols = self.grid_columns.max(1) as isize;
+            let folder_count = if self.config.multiview_show_folders {
+                self.multiview_subfolders.len()
+            } else {
+                0
+            };
+            let image_count = self.files.len();
+            let total_items = folder_count + image_count;
+
             let mut grid_delta: isize = 0;
             if input.prev {
                 grid_delta -= 1;
@@ -3830,19 +6721,80 @@ impl eframe::App for PhotonioApp {
             if input.down {
                 grid_delta += cols;
             }
-            if input.home {
-                if self.grid_select(0) {
+
+            if total_items > 0 {
+                let cur_unified: usize = match self.grid_selected_folder {
+                    Some(f) if f < folder_count => f,
+                    _ => {
+                        if image_count > 0 {
+                            folder_count + self.current_index.min(image_count - 1)
+                        } else {
+                            0
+                        }
+                    }
+                };
+
+                if input.home {
+                    if folder_count > 0 {
+                        self.grid_selected_folder = Some(0);
+                    } else if image_count > 0 {
+                        self.grid_selected_folder = None;
+                        self.grid_select(0);
+                    }
+                    self.scroll_to_selected = true;
+                } else if input.end {
+                    let last_idx = total_items.saturating_sub(1);
+                    if last_idx < folder_count {
+                        self.grid_selected_folder = Some(last_idx);
+                    } else if image_count > 0 {
+                        self.grid_selected_folder = None;
+                        self.grid_select(last_idx - folder_count);
+                    }
+                    self.scroll_to_selected = true;
+                } else if grid_delta != 0 {
+                    let new_unified = (cur_unified as isize + grid_delta)
+                        .clamp(0, (total_items - 1) as isize) as usize;
+                    if new_unified < folder_count {
+                        self.grid_selected_folder = Some(new_unified);
+                    } else if image_count > 0 {
+                        self.grid_selected_folder = None;
+                        self.grid_select(new_unified - folder_count);
+                    }
                     self.scroll_to_selected = true;
                 }
-            } else if input.end {
-                if self.grid_select(self.files.len().saturating_sub(1)) {
-                    self.scroll_to_selected = true;
+            }
+
+            // Preview windows & thumbnails size adjustment: Ctrl+Wheel / Ctrl+Plus / Ctrl+Minus / Ctrl+0.
+            if !self.modal_open() {
+                if input.ctrl {
+                    if input.scroll != 0.0 {
+                        let delta = input.scroll * 0.25;
+                        self.adjust_grid_tile_size(delta, ctx);
+                    }
+                    // Strip mouse wheel and zoom events from egui input so the ScrollArea NEVER scrolls the background
+                    ctx.input_mut(|i| {
+                        i.raw_scroll_delta = egui::Vec2::ZERO;
+                        i.smooth_scroll_delta = egui::Vec2::ZERO;
+                        i.events.retain(|e| !matches!(e, egui::Event::MouseWheel { .. } | egui::Event::Zoom(..)));
+                    });
                 }
-            } else if grid_delta != 0 && !self.files.is_empty() {
-                let len = self.files.len() as isize;
-                let new = (self.current_index as isize + grid_delta).clamp(0, len - 1) as usize;
-                if self.grid_select(new) {
-                    self.scroll_to_selected = true;
+                if !ctx.wants_keyboard_input() {
+                    let tile_keys = ctx.input(|i| {
+                        let plus = i.modifiers.ctrl
+                            && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals));
+                        let minus = i.modifiers.ctrl && i.key_pressed(egui::Key::Minus);
+                        let reset = i.modifiers.ctrl && i.key_pressed(egui::Key::Num0);
+                        (plus, minus, reset)
+                    });
+                    if tile_keys.0 {
+                        self.adjust_grid_tile_size(20.0, ctx);
+                    }
+                    if tile_keys.1 {
+                        self.adjust_grid_tile_size(-20.0, ctx);
+                    }
+                    if tile_keys.2 {
+                        self.reset_grid_tile_size(ctx);
+                    }
                 }
             }
         } else {
@@ -3863,15 +6815,38 @@ impl eframe::App for PhotonioApp {
             }
         }
 
-        // Enter toggles between Viewer and the fullscreen grid selector.
-        if input.enter && !self.modal_open() {
+        // Enter toggles between Viewer and the fullscreen grid selector, or navigates into a folder.
+        if input.enter && !self.modal_open() && !self.grid_path_editing {
             if self.view_mode == ViewMode::Viewer {
-                if !self.files.is_empty() {
+                let folder_count = if self.config.multiview_show_folders {
+                    self.multiview_subfolders.len()
+                } else {
+                    0
+                };
+                if !self.files.is_empty() || folder_count > 0 || self.current_folder().is_some() {
                     self.view_mode = ViewMode::Grid;
                     self.scroll_to_selected = true;
+                    self.refresh_multiview_subfolders(ctx);
+                    self.trigger_folder_refresh(ctx, false);
                 }
             } else {
-                self.leave_grid(ctx);
+                let folder_count = if self.config.multiview_show_folders {
+                    self.multiview_subfolders.len()
+                } else {
+                    0
+                };
+                if let Some(f) = self.grid_selected_folder {
+                    if f < folder_count {
+                        let target = self.multiview_subfolders[f].path.clone();
+                        self.open_directory(target, ctx);
+                        self.scroll_to_selected = true;
+                        self.grid_selected_folder = None;
+                    } else {
+                        self.leave_grid(ctx);
+                    }
+                } else {
+                    self.leave_grid(ctx);
+                }
             }
         }
 
@@ -3904,9 +6879,18 @@ impl eframe::App for PhotonioApp {
         if input.resize_image {
             self.open_resize_dialog();
         }
+        if input.refresh_folder {
+            self.trigger_manual_refresh(ctx);
+        }
+        if input.rename {
+            self.open_rename_dialog();
+        }
 
         if self.view_mode == ViewMode::Grid {
             self.draw_grid_view(ctx);
+            if !self.show_folder_browser {
+                self.draw_transient_status_pill(ctx);
+            }
         } else {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none())
@@ -3923,6 +6907,10 @@ impl eframe::App for PhotonioApp {
             // visually clean. Their config flags are left untouched.
             if !self.show_folder_browser {
                 self.draw_hud(ctx);
+
+                if self.files.is_empty() || self.config.hud_position == config::HudPosition::Hidden {
+                    self.draw_transient_status_pill(ctx);
+                }
 
                 if let Some(action) = self.draw_quick_pill(ctx) {
                     self.execute_pill_action(action, ctx);
@@ -3941,6 +6929,7 @@ impl eframe::App for PhotonioApp {
         self.draw_settings(ctx);
         self.draw_image_info(ctx);
         self.draw_resize_dialog(ctx);
+        self.draw_rename_dialog(ctx);
 
         if input.delete {
             self.delete_current(ctx);
@@ -3969,8 +6958,18 @@ impl eframe::App for PhotonioApp {
                 self.show_resize_dialog = false;
             } else if self.show_folder_browser {
                 self.close_folder_browser();
+            } else if self.rename_state.is_some() {
+                self.rename_state = None;
             } else if self.context_menu_pos.is_some() {
                 self.context_menu_pos = None;
+            } else if self.grid_path_editing {
+                self.grid_path_editing = false;
+                self.grid_path_invalid = false;
+                if let Some(dir) = self.current_folder() {
+                    self.grid_path_buffer = dir.display().to_string();
+                } else {
+                    self.grid_path_buffer.clear();
+                }
             } else if self.view_mode == ViewMode::Grid {
                 self.leave_grid(ctx);
             } else {
@@ -3992,6 +6991,13 @@ impl eframe::App for PhotonioApp {
         }
         if input.reveal {
             self.reveal_current();
+        }
+        if input.save {
+            if self.rotation != 0 {
+                self.save_rotation_overwrite(ctx);
+            } else {
+                self.show_status("No changes to save");
+            }
         }
         if input.save_as {
             self.save_current_as();
@@ -4029,6 +7035,24 @@ impl eframe::App for PhotonioApp {
             }
         }
 
+        // Transient feedback status pill lifecycle: animate fade-in, hold full visibility,
+        // animate fade-out, and auto-clear when expired so the message never
+        // hijacks the status pill even if the user is completely idle.
+        if let Some((_, at)) = &self.feedback {
+            let elapsed = at.elapsed().as_secs_f32();
+            if elapsed < FEEDBACK_FADE_IN_SECS {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            } else if elapsed < FEEDBACK_HOLD_SECS {
+                let remaining = FEEDBACK_HOLD_SECS - elapsed;
+                ctx.request_repaint_after(std::time::Duration::from_secs_f32(remaining));
+            } else if elapsed < FEEDBACK_TOTAL_SECS {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            } else {
+                self.feedback = None;
+                ctx.request_repaint();
+            }
+        }
+
         // Overlay auto-fade: wake up exactly when the fade should begin, then
         // repaint during the fade window so the opacity animates; idle the rest
         // of the time so we don't waste CPU.
@@ -4053,3 +7077,8 @@ impl eframe::App for PhotonioApp {
         self.render_folder_browser(ctx);
     }
 }
+
+
+
+
+

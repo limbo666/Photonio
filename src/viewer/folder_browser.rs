@@ -20,6 +20,8 @@ const MAX_THUMBS: usize = 300;
 const COVER_SCAN_LIMIT: usize = 50;
 /// Thumbnail cache capacity (textures).
 const THUMB_CACHE_CAP: usize = 300;
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 170, 40);
+const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 87, 87);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FileKind {
@@ -139,6 +141,8 @@ pub enum BrowserResult {
 pub struct Browser {
     pub current: PathBuf,
     pub selected: Option<PathBuf>,
+    pub back_stack: Vec<PathBuf>,
+    pub forward_stack: Vec<PathBuf>,
     listing: Listing,
     covers_loading: bool,
     generation: u64,
@@ -154,6 +158,11 @@ pub struct Browser {
     quick: QuickAccess,
     labels_rx: Option<Receiver<HashMap<String, String>>>,
     pub pinned: Vec<PathBuf>,
+    is_creating_folder: bool,
+    new_folder_name: String,
+    new_folder_focus_pending: bool,
+    new_folder_error: Option<String>,
+    path_create_prompt: Option<PathBuf>,
 }
 
 impl Browser {
@@ -178,6 +187,8 @@ impl Browser {
         let mut b = Self {
             current: start.clone(),
             selected: None,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
             listing: Listing { folders: Vec::new(), files: Vec::new(), truncated: false },
             covers_loading: false,
             generation: 0,
@@ -193,20 +204,122 @@ impl Browser {
             quick,
             labels_rx: Some(labels_rx),
             pinned: cfg.pinned_folders.clone(),
+            is_creating_folder: false,
+            new_folder_name: String::new(),
+            new_folder_focus_pending: false,
+            new_folder_error: None,
+            path_create_prompt: None,
         };
-        b.navigate(start);
+        b.navigate_internal(start);
         b
     }
 
-    /// Navigate to `path`: enumerate direct children synchronously so the cards
-    /// appear on frame one, then lazily discover covers + decode thumbnails on a
-    /// background thread (never blocking the UI).
+    pub fn start_create_folder(&mut self) {
+        let default_name = unique_subfolder_name(&self.current, "New Folder");
+        self.new_folder_name = default_name;
+        self.is_creating_folder = true;
+        self.new_folder_focus_pending = true;
+        self.new_folder_error = None;
+        self.path_create_prompt = None;
+    }
+
+    fn commit_create_folder(&mut self) -> Option<PathBuf> {
+        let trimmed = self.new_folder_name.trim();
+        if trimmed.is_empty() {
+            self.new_folder_error = Some("Folder name cannot be empty".into());
+            return None;
+        }
+        if trimmed.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*']) {
+            self.new_folder_error = Some("Name contains invalid characters".into());
+            return None;
+        }
+        let target = self.current.join(trimmed);
+        if target.exists() {
+            self.new_folder_error = Some("A folder with this name already exists".into());
+            return None;
+        }
+        match std::fs::create_dir(&target) {
+            Ok(()) => {
+                self.is_creating_folder = false;
+                self.new_folder_error = None;
+                self.navigate_internal(self.current.clone());
+                Some(target)
+            }
+            Err(e) => {
+                self.new_folder_error = Some(format!("Create failed: {e}"));
+                None
+            }
+        }
+    }
+
+    fn push_history(&mut self, from: PathBuf) {
+        if self.back_stack.last() == Some(&from) {
+            return;
+        }
+        self.back_stack.push(from);
+        if self.back_stack.len() > 50 {
+            self.back_stack.remove(0);
+        }
+        self.forward_stack.clear();
+    }
+
+    /// Navigate back to the previous folder in history.
+    pub fn navigate_back(&mut self) -> bool {
+        while let Some(prev) = self.back_stack.pop() {
+            if prev.is_dir() {
+                let cur = self.current.clone();
+                if self.forward_stack.last() != Some(&cur) {
+                    self.forward_stack.push(cur);
+                    if self.forward_stack.len() > 50 {
+                        self.forward_stack.remove(0);
+                    }
+                }
+                self.navigate_internal(prev);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Navigate forward to the next folder in history.
+    pub fn navigate_forward(&mut self) -> bool {
+        while let Some(next) = self.forward_stack.pop() {
+            if next.is_dir() {
+                let cur = self.current.clone();
+                if self.back_stack.last() != Some(&cur) {
+                    self.back_stack.push(cur);
+                    if self.back_stack.len() > 50 {
+                        self.back_stack.remove(0);
+                    }
+                }
+                self.navigate_internal(next);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Navigate to `path`: records the previous folder in history so the user can
+    /// go Back/Forward, then enumerates direct children synchronously.
     pub fn navigate(&mut self, path: PathBuf) {
+        if path != self.current {
+            let cur = self.current.clone();
+            self.push_history(cur);
+        }
+        self.navigate_internal(path);
+    }
+
+    /// Low-level folder navigation without recording back/forward history stacks.
+    pub fn navigate_internal(&mut self, path: PathBuf) {
         self.current = path.clone();
         self.selected = None;
         self.temp_path_buffer = path.display().to_string();
         self.is_editing_path = false;
         self.path_invalid = false;
+        self.is_creating_folder = false;
+        self.new_folder_name.clear();
+        self.new_folder_error = None;
+        self.path_create_prompt = None;
         self.generation = self.generation.wrapping_add(1);
         let gen = self.generation;
 
@@ -319,15 +432,20 @@ impl Browser {
         let start_filter = self.filter;
         let start_show_files = self.show_files;
 
+        let mut navigate_back = false;
+        let mut navigate_forward = false;
+
         // Global keys (gated by keyboard focus and address-bar edit mode).
         let typing = ctx.wants_keyboard_input();
-        let (up_key, enter_key) = ctx.input(|i| {
+        let (back_key, forward_key, up_key, enter_key) = ctx.input(|i| {
             let nav = !typing && !self.is_editing_path;
-            let up = nav
+            let back = nav
                 && (i.key_pressed(egui::Key::Backspace)
                     || (i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)));
+            let forward = nav && (i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight));
+            let up = nav && (i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp));
             let enter = nav && i.key_pressed(egui::Key::Enter);
-            (up, enter)
+            (back, forward, up, enter)
         });
 
         // Ctrl+L focuses the address bar for raw-path editing.
@@ -365,18 +483,81 @@ impl Browser {
             .show(ctx, |ui| {
                 // --- Unified address bar (Row 1) ---
                 ui.horizontal(|ui| {
-                    // Up button (disabled at the root / drive list).
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                    // 1. Back button (chevron-left)
+                    let can_back = !self.back_stack.is_empty();
+                    let back_tooltip = if let Some(p) = self.back_stack.last() {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.display().to_string());
+                        format!("Back to \"{}\" (Alt+Left)", name)
+                    } else {
+                        "Back (Alt+Left)".to_string()
+                    };
+                    if colors
+                        .nav_icon_button(
+                            ui,
+                            icons::ICON_PREV,
+                            13.0,
+                            egui::vec2(26.0, 26.0),
+                            can_back,
+                            &back_tooltip,
+                        )
+                        .clicked()
+                    {
+                        navigate_back = true;
+                    }
+
+                    // 2. Forward button (chevron-right)
+                    let can_forward = !self.forward_stack.is_empty();
+                    let forward_tooltip = if let Some(p) = self.forward_stack.last() {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.display().to_string());
+                        format!("Forward to \"{}\" (Alt+Right)", name)
+                    } else {
+                        "Forward (Alt+Right)".to_string()
+                    };
+                    if colors
+                        .nav_icon_button(
+                            ui,
+                            icons::ICON_NEXT,
+                            13.0,
+                            egui::vec2(26.0, 26.0),
+                            can_forward,
+                            &forward_tooltip,
+                        )
+                        .clicked()
+                    {
+                        navigate_forward = true;
+                    }
+
+                    // 3. Up button (arrow-up)
                     let can_up = self.current.parent().is_some();
-                    let up = ui.add_enabled(can_up, egui::Button::new(icons::ICON_UP));
-                    if up.clicked() {
+                    if colors
+                        .nav_icon_button(
+                            ui,
+                            icons::ICON_UP,
+                            13.0,
+                            egui::vec2(26.0, 26.0),
+                            can_up,
+                            "Go to parent folder (Alt+Up)",
+                        )
+                        .clicked()
+                    {
                         if let Some(parent) = self.current.parent().map(|p| p.to_path_buf()) {
                             navigate_to = Some(parent);
                         }
                     }
 
+                    ui.add_space(2.0);
+
                     // Inset address-bar frame (input-like).
                     let frame_stroke = if self.path_invalid {
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(235, 87, 87))
+                        egui::Stroke::new(1.0_f32, ERROR_COLOR)
                     } else {
                         egui::Stroke::new(1.0_f32, colors.border)
                     };
@@ -389,89 +570,215 @@ impl Browser {
                         .fill(input_fill)
                         .stroke(frame_stroke)
                         .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .inner_margin(egui::Margin {
+                            left: 3.0,
+                            right: 6.0,
+                            top: 2.0,
+                            bottom: 2.0,
+                        })
                         .show(ui, |ui| {
+                            ui.set_min_height(22.0);
                             ui.set_min_width(ui.available_width());
-                            if self.is_editing_path {
-                                // Raw path edit mode.
-                                let mut output = egui::TextEdit::singleline(
-                                    &mut self.temp_path_buffer,
-                                )
-                                .desired_width(f32::INFINITY)
-                                .text_color(if self.path_invalid {
-                                    egui::Color32::from_rgb(235, 87, 87)
-                                } else {
-                                    colors.primary
-                                })
-                                .show(ui);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
 
-                                if self.address_focus_pending {
-                                    output.response.request_focus();
-                                    let len = self.temp_path_buffer.len();
-                                    let range = egui::text::CCursorRange::two(
-                                        egui::text::CCursor::new(0),
-                                        egui::text::CCursor::new(len),
-                                    );
-                                    output.state.cursor.set_char_range(Some(range));
-                                    output.state.store(ui.ctx(), output.response.id);
-                                    self.address_focus_pending = false;
-                                }
-
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                if enter {
-                                    text_consumed_enter = true;
-                                    let path = normalize_path(&self.temp_path_buffer);
-                                    if path.is_dir() {
-                                        navigate_to = Some(path);
-                                        self.is_editing_path = false;
-                                        self.path_invalid = false;
-                                    } else {
-                                        self.path_invalid = true;
-                                        output.response.request_focus();
-                                    }
-                                } else if esc || output.response.lost_focus() {
-                                    self.is_editing_path = false;
-                                    self.path_invalid = false;
-                                    self.temp_path_buffer = self.current.display().to_string();
-                                }
-                            } else {
-                                // Breadcrumb mode.
-                                let mut enter_edit = false;
-                                ui.horizontal_wrapped(|ui| {
-                                    let crumbs = breadcrumbs(&self.current);
-                                    for (i, (label, path)) in crumbs.iter().enumerate() {
-                                        if i > 0 {
-                                            ui.label(
-                                                egui::RichText::new("›")
-                                                    .size(13.0)
-                                                    .color(colors.muted),
-                                            );
-                                        }
-                                        let text = egui::RichText::new(label).size(13.0);
-                                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                                            navigate_to = Some(path.clone());
-                                        }
-                                    }
-                                    // Empty area to the right → edit mode.
-                                    let empty = ui.allocate_rect(
-                                        ui.available_rect_before_wrap(),
-                                        egui::Sense::click(),
-                                    );
-                                    if empty.clicked() {
-                                        enter_edit = true;
-                                    }
-                                });
-                                if enter_edit {
+                                // Folder icon on the left edge inside the address bar
+                                let folder_resp = colors.nav_icon_button(
+                                    ui,
+                                    icons::ICON_FOLDER,
+                                    13.0,
+                                    egui::vec2(22.0, 22.0),
+                                    true,
+                                    "Folder path (Click to edit)",
+                                );
+                                if folder_resp.clicked() {
                                     self.is_editing_path = true;
                                     self.temp_path_buffer = self.current.display().to_string();
                                     self.path_invalid = false;
                                     self.address_focus_pending = true;
                                 }
-                            }
+
+                                if self.is_editing_path {
+                                    // Raw path edit mode.
+                                    let mut output = egui::TextEdit::singleline(
+                                        &mut self.temp_path_buffer,
+                                    )
+                                    .desired_width(f32::INFINITY)
+                                    .frame(false)
+                                    .text_color(if self.path_invalid {
+                                        ERROR_COLOR
+                                    } else {
+                                        colors.primary
+                                    })
+                                    .show(ui);
+
+                                    if self.address_focus_pending {
+                                        output.response.request_focus();
+                                        let len = self.temp_path_buffer.len();
+                                        let range = egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(len),
+                                        );
+                                        output.state.cursor.set_char_range(Some(range));
+                                        output.state.store(ui.ctx(), output.response.id);
+                                        self.address_focus_pending = false;
+                                    }
+
+                                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                    if enter {
+                                        text_consumed_enter = true;
+                                        let path = normalize_path(&self.temp_path_buffer);
+                                        if path.is_dir() {
+                                            navigate_to = Some(path);
+                                            self.is_editing_path = false;
+                                            self.path_invalid = false;
+                                            self.path_create_prompt = None;
+                                        } else {
+                                            self.path_invalid = true;
+                                            self.path_create_prompt = Some(path);
+                                            self.is_creating_folder = false;
+                                        }
+                                    } else if esc || (output.response.lost_focus() && self.path_create_prompt.is_none()) {
+                                        self.is_editing_path = false;
+                                        self.path_invalid = false;
+                                        self.temp_path_buffer = self.current.display().to_string();
+                                    }
+                                } else {
+                                    // Breadcrumb mode.
+                                    let mut enter_edit = false;
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+                                        let crumbs = breadcrumbs(&self.current);
+                                        let crumb_count = crumbs.len();
+                                        for (i, (label, path)) in crumbs.iter().enumerate() {
+                                            if i > 0 {
+                                                ui.label(
+                                                    egui::RichText::new("›")
+                                                        .size(12.0)
+                                                        .color(colors.muted),
+                                                );
+                                            }
+                                            let is_last = i == crumb_count - 1;
+                                            let text = if is_last {
+                                                egui::RichText::new(label)
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(colors.primary)
+                                            } else {
+                                                egui::RichText::new(label)
+                                                    .size(13.0)
+                                                    .color(colors.muted)
+                                            };
+                                            let btn_resp = ui.scope(|ui| {
+                                                let visuals = ui.visuals_mut();
+                                                visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                                visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                                                visuals.widgets.hovered.bg_fill = if colors.dark_mode {
+                                                    egui::Color32::from_white_alpha(22)
+                                                } else {
+                                                    egui::Color32::from_black_alpha(18)
+                                                };
+                                                visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                                                visuals.widgets.active.bg_fill = if colors.dark_mode {
+                                                    egui::Color32::from_white_alpha(35)
+                                                } else {
+                                                    egui::Color32::from_black_alpha(28)
+                                                };
+                                                visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                                                ui.spacing_mut().button_padding = egui::vec2(4.0, 1.5);
+                                                ui.add(egui::Button::new(text).rounding(3.0))
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            });
+                                            if btn_resp.inner.clicked() {
+                                                navigate_to = Some(path.clone());
+                                            }
+                                        }
+                                        // Empty area to the right → edit mode.
+                                        let empty = ui.allocate_rect(
+                                            ui.available_rect_before_wrap(),
+                                            egui::Sense::click(),
+                                        );
+                                        if empty.clicked() {
+                                            enter_edit = true;
+                                        }
+                                    });
+                                    if enter_edit {
+                                        self.is_editing_path = true;
+                                        self.temp_path_buffer = self.current.display().to_string();
+                                        self.path_invalid = false;
+                                        self.address_focus_pending = true;
+                                    }
+                                }
+                            });
                         });
                 });
                 ui.separator();
+
+                if let Some(target) = self.path_create_prompt.clone() {
+                    let folder_name = target
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| target.display().to_string());
+                    egui::Frame::none()
+                        .fill(if colors.dark_mode {
+                            egui::Color32::from_black_alpha(90)
+                        } else {
+                            egui::Color32::from_black_alpha(20)
+                        })
+                        .stroke(egui::Stroke::new(1.0_f32, WARN_COLOR))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} Folder \"{}\" does not exist.",
+                                        icons::ICON_WARN,
+                                        folder_name
+                                    ))
+                                    .color(WARN_COLOR),
+                                );
+                                let create_btn = colors.button_primary(
+                                    ui,
+                                    format!("{} Create & Open", icons::ICON_FOLDER),
+                                    egui::vec2(0.0, 24.0),
+                                    true,
+                                );
+                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if create_btn.clicked() || enter_pressed {
+                                    match std::fs::create_dir_all(&target) {
+                                        Ok(()) => {
+                                            self.path_create_prompt = None;
+                                            self.is_editing_path = false;
+                                            self.path_invalid = false;
+                                            navigate_to = Some(target.clone());
+                                        }
+                                        Err(e) => {
+                                            self.new_folder_error = Some(format!("Create failed: {e}"));
+                                        }
+                                    }
+                                }
+                                let esc_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                if colors
+                                    .button_secondary(
+                                        ui,
+                                        format!("{} Cancel", icons::ICON_XMARK),
+                                        egui::vec2(0.0, 24.0),
+                                        true,
+                                    )
+                                    .clicked()
+                                    || esc_pressed
+                                {
+                                    self.path_create_prompt = None;
+                                    self.path_invalid = false;
+                                    self.is_editing_path = false;
+                                    self.temp_path_buffer = self.current.display().to_string();
+                                }
+                            });
+                        });
+                    ui.separator();
+                }
 
                 // View + filter toolbar: a full-width, subtle tinted strip.
                 let strip_tint = if colors.dark_mode {
@@ -485,46 +792,162 @@ impl Browser {
                     .show(ui, |ui| {
                         // Force the tint to span the entire window width.
                         ui.set_min_width(ui.available_width());
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("View:");
-                            ui.selectable_value(
-                                &mut self.tile_size,
-                                config::FolderTileSize::Small,
-                                "Small",
-                            );
-                            ui.selectable_value(
-                                &mut self.tile_size,
-                                config::FolderTileSize::Medium,
-                                "Medium",
-                            );
-                            ui.selectable_value(
-                                &mut self.tile_size,
-                                config::FolderTileSize::Large,
-                                "Large",
-                            );
-                            ui.selectable_value(
-                                &mut self.tile_size,
-                                config::FolderTileSize::List,
-                                "List",
-                            );
-                            ui.separator();
-                            ui.label("Show:");
-                            ui.selectable_value(
-                                &mut self.filter,
-                                config::ContentFilter::Images,
-                                "Images",
-                            );
-                            ui.selectable_value(
-                                &mut self.filter,
-                                config::ContentFilter::Media,
-                                "Media",
-                            );
-                            ui.selectable_value(&mut self.filter, config::ContentFilter::All, "All");
-                            ui.separator();
-                            ui.checkbox(&mut self.show_files, "Show files");
-                        });
+                        let toolbar_h = 24.0;
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), toolbar_h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+                                ui.label("View:");
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.tile_size,
+                                    config::FolderTileSize::Small,
+                                    "Small",
+                                );
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.tile_size,
+                                    config::FolderTileSize::Medium,
+                                    "Medium",
+                                );
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.tile_size,
+                                    config::FolderTileSize::Large,
+                                    "Large",
+                                );
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.tile_size,
+                                    config::FolderTileSize::List,
+                                    "List",
+                                );
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label("Show:");
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.filter,
+                                    config::ContentFilter::Images,
+                                    "Images",
+                                );
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.filter,
+                                    config::ContentFilter::Media,
+                                    "Media",
+                                );
+                                colors.segmented_value(
+                                    ui,
+                                    &mut self.filter,
+                                    config::ContentFilter::All,
+                                    "All",
+                                );
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.checkbox(&mut self.show_files, "Show files")
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let can_create = self.current.is_dir();
+                                    let btn = colors.button_secondary(
+                                        ui,
+                                        format!("{} New Folder", icons::ICON_PLUS),
+                                        egui::vec2(105.0, 24.0),
+                                        can_create,
+                                    );
+                                    if btn
+                                        .on_hover_text("Create a new subfolder in the current directory")
+                                        .clicked()
+                                    {
+                                        self.start_create_folder();
+                                    }
+                                });
+                            },
+                        );
                     });
                 ui.separator();
+
+                if self.is_creating_folder {
+                    let frame_stroke = if self.new_folder_error.is_some() {
+                        egui::Stroke::new(1.0_f32, ERROR_COLOR)
+                    } else {
+                        egui::Stroke::new(1.0_f32, colors.primary)
+                    };
+                    egui::Frame::none()
+                        .fill(if colors.dark_mode {
+                            egui::Color32::from_black_alpha(80)
+                        } else {
+                            egui::Color32::from_black_alpha(15)
+                        })
+                        .stroke(frame_stroke)
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                        .show(ui, |ui| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), 24.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    ui.label(
+                                        egui::RichText::new(format!("{} Name:", icons::ICON_FOLDER))
+                                            .color(colors.primary),
+                                    );
+                                    let mut output = egui::TextEdit::singleline(&mut self.new_folder_name)
+                                        .desired_width(200.0)
+                                        .show(ui);
+
+                                    if self.new_folder_focus_pending {
+                                        output.response.request_focus();
+                                        let len = self.new_folder_name.len();
+                                        let range = egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(len),
+                                        );
+                                        output.state.cursor.set_char_range(Some(range));
+                                        output.state.store(ui.ctx(), output.response.id);
+                                        self.new_folder_focus_pending = false;
+                                    }
+
+                                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                                    let create_btn = colors.button_primary(
+                                        ui,
+                                        format!("{} Create", icons::ICON_CHECK),
+                                        egui::vec2(75.0, 24.0),
+                                        true,
+                                    );
+                                    if create_btn.clicked() || (output.response.has_focus() && enter) {
+                                        if let Some(created) = self.commit_create_folder() {
+                                            select_path = Some(created);
+                                        }
+                                    }
+                                    let cancel_btn = colors.button_secondary(
+                                        ui,
+                                        format!("{} Cancel", icons::ICON_XMARK),
+                                        egui::vec2(75.0, 24.0),
+                                        true,
+                                    );
+                                    if cancel_btn.clicked() || esc {
+                                        self.is_creating_folder = false;
+                                        self.new_folder_error = None;
+                                    }
+                                    if let Some(err) = &self.new_folder_error {
+                                        ui.label(
+                                            egui::RichText::new(err)
+                                                .color(ERROR_COLOR)
+                                                .small(),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                    ui.separator();
+                }
 
                 // Reserve room below the body for the trailing separator and the
                 // footer button row (plus their item spacings). This must be >= the
@@ -596,28 +1019,46 @@ impl Browser {
                             );
                             ui.add_space(4.0);
                             for path in &self.pinned {
+                                let exists = path.is_dir();
                                 let name = path
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| path.display().to_string());
-                                let text =
-                                    format!("{} {}", icons::ICON_FOLDER, truncate_label(&name, 22));
+                                let (icon, text_color, tip_suffix) = if exists {
+                                    (icons::ICON_FOLDER, colors.gold, "")
+                                } else {
+                                    (icons::ICON_WARN, WARN_COLOR, " (deleted or missing)")
+                                };
+                                let display_name = if exists {
+                                    truncate_label(&name, 22)
+                                } else {
+                                    format!("{} (missing)", truncate_label(&name, 13))
+                                };
+                                let text = format!("{} {}", icon, display_name);
                                 // Flat button (not a selectable label) so the cursor
                                 // stays a pointing hand instead of a text I-beam.
                                 let resp = ui
                                     .add(
                                         egui::Button::new(
-                                            egui::RichText::new(text).color(pin_accent()),
+                                            egui::RichText::new(text).color(text_color),
                                         )
                                         .frame(false)
                                         .min_size(egui::vec2(ui.available_width(), 20.0)),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = resp.on_hover_text(path.display().to_string());
+                                let resp = resp.on_hover_text(format!("{}{tip_suffix}", path.display()));
                                 if resp.clicked() {
                                     navigate_to = Some(path.clone());
                                 }
                                 resp.context_menu(|ui| {
+                                    if !exists {
+                                        if ui.button("+ Recreate Folder").clicked() {
+                                            if std::fs::create_dir_all(path).is_ok() {
+                                                navigate_to = Some(path.clone());
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    }
                                     if ui
                                         .button(format!(
                                             "{} Remove from Quick Access",
@@ -659,19 +1100,108 @@ impl Browser {
                         .max_height(body_h)
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                if self.listing.truncated {
-                                    ui.label(
-                                        egui::RichText::new("(more files not shown)")
-                                            .small()
-                                            .italics()
-                                            .color(colors.muted),
-                                    );
-                                }
+                                if !self.current.exists() {
+                                    ui.add_space(30.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(icons::ICON_WARN)
+                                                .size(28.0)
+                                                .color(WARN_COLOR),
+                                        );
+                                        ui.add_space(6.0);
+                                        let name = self
+                                            .current
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| self.current.display().to_string());
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Folder \"{name}\" was not found"
+                                            ))
+                                            .strong()
+                                            .size(15.0),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(self.current.display().to_string())
+                                                .color(colors.muted)
+                                                .small(),
+                                        );
+                                        ui.add_space(14.0);
 
-                                if self.tile_size == config::FolderTileSize::List {
-                                    self.render_list(ui, colors, &mut navigate_to, &mut select_path);
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(
+                                                (ui.available_width() - 260.0).max(0.0) / 2.0,
+                                            );
+                                            if colors
+                                                .button_primary(
+                                                    ui,
+                                                    format!("{} Recreate Folder", icons::ICON_PLUS),
+                                                    egui::vec2(0.0, 26.0),
+                                                    true,
+                                                )
+                                                .clicked()
+                                            {
+                                                if std::fs::create_dir_all(&self.current).is_ok() {
+                                                    navigate_to = Some(self.current.clone());
+                                                }
+                                            }
+                                            ui.add_space(8.0);
+                                            if let Some(parent) =
+                                                self.current.parent().map(|p| p.to_path_buf())
+                                            {
+                                                if parent.is_dir() {
+                                                    if colors
+                                                        .button_secondary(
+                                                            ui,
+                                                            format!(
+                                                                "{} Go to Parent",
+                                                                icons::ICON_UP
+                                                            ),
+                                                            egui::vec2(0.0, 26.0),
+                                                            true,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        navigate_to = Some(parent);
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        let is_pinned = self.pinned.contains(&self.current);
+                                        if is_pinned {
+                                            ui.add_space(10.0);
+                                            if colors
+                                                .button_secondary(
+                                                    ui,
+                                                    format!(
+                                                        "{} Remove from Quick Access",
+                                                        icons::ICON_TRASH
+                                                    ),
+                                                    egui::vec2(0.0, 26.0),
+                                                    true,
+                                                )
+                                                .clicked()
+                                            {
+                                                result = BrowserResult::Unpin(self.current.clone());
+                                            }
+                                        }
+                                    });
                                 } else {
-                                    self.render_grid(ui, colors, &mut navigate_to, &mut select_path);
+                                    if self.listing.truncated {
+                                        ui.label(
+                                            egui::RichText::new("(more files not shown)")
+                                                .small()
+                                                .italics()
+                                                .color(colors.muted),
+                                        );
+                                    }
+
+                                    if self.tile_size == config::FolderTileSize::List {
+                                        self.render_list(ui, colors, &mut navigate_to, &mut select_path);
+                                    } else {
+                                        self.render_grid(ui, colors, &mut navigate_to, &mut select_path);
+                                    }
                                 }
                             });
                         });
@@ -697,52 +1227,86 @@ impl Browser {
                     }
                 };
                 let selected_text = format!("{} Selected: {}", icons::ICON_FOLDER, selected_label);
-                let pin_target = self.selected.clone().unwrap_or_else(|| self.current.clone());
+                let target = self.selected.clone().unwrap_or_else(|| self.current.clone());
+                let can_select = target.is_dir();
+                let pin_target = target.clone();
                 let is_pinned = self.pinned.contains(&pin_target);
-                let accent = pin_accent();
                 // Left-to-right: readout anchored far left, buttons far right.
-                ui.horizontal(|ui| {
-                    // Far left: bounded readout so long names truncate before
-                    // crowding the right-aligned buttons.
-                    let label_max = (ui.available_width() - 360.0).max(60.0);
-                    ui.scope(|ui| {
-                        ui.set_max_width(label_max);
-                        let resp = ui.add(egui::Label::new(selected_text).truncate());
-                        resp.on_hover_text(full_path.display().to_string());
-                    });
-                    // Far right: [Pin] —— [Select Folder] —— [Cancel].
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            result = BrowserResult::Cancel;
-                        }
-                        ui.add_space(8.0);
-                        if ui.button("Select Folder").clicked() {
-                            result = BrowserResult::Select(
-                                self.selected.clone().unwrap_or_else(|| self.current.clone()),
+                let footer_h = 28.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), footer_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        // Far left: bounded readout so long names truncate before
+                        // crowding the right-aligned buttons.
+                        let label_max = (ui.available_width() - 420.0).max(60.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(label_max, footer_h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let resp = ui.add(egui::Label::new(selected_text).truncate());
+                                resp.on_hover_text(full_path.display().to_string());
+                            },
+                        );
+                        // Far right: [Pin to Quick Access] —— [Select Folder] —— [Cancel].
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+
+                            // 1. Cancel button (secondary, xmark icon)
+                            if colors
+                                .button_secondary(
+                                    ui,
+                                    format!("{} Cancel", icons::ICON_XMARK),
+                                    egui::vec2(90.0, 28.0),
+                                    true,
+                                )
+                                .clicked()
+                            {
+                                result = BrowserResult::Cancel;
+                            }
+
+                            // 2. Select Folder button (primary, check icon)
+                            let select_btn = colors.button_primary(
+                                ui,
+                                format!("{} Select Folder", icons::ICON_CHECK),
+                                egui::vec2(125.0, 28.0),
+                                can_select,
                             );
-                        }
-                        ui.add_space(16.0);
-                        if is_pinned {
-                            ui.add_enabled(
-                                false,
-                                egui::Button::new(format!("{} Pinned", icons::ICON_CHECK)),
-                            );
-                        } else if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!(
-                                        "{} Pin to Quick Access",
-                                        icons::ICON_PIN
-                                    ))
-                                    .color(accent),
-                                ),
-                            )
-                            .clicked()
-                        {
-                            result = BrowserResult::Pin(pin_target.clone());
-                        }
-                    });
-                });
+                            if select_btn.clicked() {
+                                result = BrowserResult::Select(target);
+                            }
+                            if !can_select {
+                                select_btn.on_hover_text("Cannot select a non-existing folder");
+                            }
+
+                            ui.add_space(8.0);
+
+                            // 3. Pin to Quick Access button (accent, pin icon, larger size 168x28)
+                            if is_pinned {
+                                colors.button_gold(
+                                    ui,
+                                    format!("{} Pinned", icons::ICON_CHECK),
+                                    egui::vec2(168.0, 28.0),
+                                    false,
+                                );
+                            } else {
+                                let pin_btn = colors.button_gold(
+                                    ui,
+                                    format!("{} Pin to Quick Access", icons::ICON_PIN),
+                                    egui::vec2(168.0, 28.0),
+                                    can_select,
+                                );
+                                if pin_btn.clicked() {
+                                    result = BrowserResult::Pin(pin_target);
+                                }
+                                if !can_select {
+                                    pin_btn.on_hover_text("Cannot pin a non-existing folder");
+                                }
+                            }
+                        });
+                    },
+                );
             });
 
         // The window's close (X) button flips `open` directly; bail out early.
@@ -753,7 +1317,15 @@ impl Browser {
         // Keyboard navigation (only when the modal is still open and no button
         // already fired).
         if matches!(result, BrowserResult::None) {
-            if up_key {
+            if back_key {
+                if !self.back_stack.is_empty() {
+                    navigate_back = true;
+                } else if let Some(parent) = self.current.parent().map(|p| p.to_path_buf()) {
+                    navigate_to = Some(parent);
+                }
+            } else if forward_key {
+                navigate_forward = true;
+            } else if up_key {
                 if let Some(parent) = self.current.parent().map(|p| p.to_path_buf()) {
                     navigate_to = Some(parent);
                 }
@@ -765,7 +1337,11 @@ impl Browser {
         }
 
         // Apply navigation / selection once.
-        if let Some(path) = navigate_to {
+        if navigate_back {
+            self.navigate_back();
+        } else if navigate_forward {
+            self.navigate_forward();
+        } else if let Some(path) = navigate_to {
             self.navigate(path);
         } else if let Some(path) = select_path {
             self.selected = Some(path);
@@ -780,7 +1356,7 @@ impl Browser {
             self.thumbs.clear();
         }
         if settings_changed {
-            self.navigate(self.current.clone());
+            self.navigate_internal(self.current.clone());
         }
 
         result
@@ -1280,12 +1856,6 @@ pub fn resolve_start(remembered: Option<PathBuf>) -> PathBuf {
     PathBuf::from("C:\\")
 }
 
-/// Warm amber/gold accent shared by the Pin button and the Pinned sidebar
-/// section, so the two read as a linked pair in both Light and Dark themes.
-fn pin_accent() -> egui::Color32 {
-    egui::Color32::from_rgb(224, 168, 44)
-}
-
 /// Truncate a label to at most `max_chars` characters with an ellipsis.
 fn truncate_label(s: &str, max_chars: usize) -> String {
     if s.chars().count() > max_chars {
@@ -1299,7 +1869,7 @@ fn truncate_label(s: &str, max_chars: usize) -> String {
 
 /// Normalize a user-typed path: strip surrounding whitespace/quotes and
 /// trailing (redundant) slashes, while preserving a drive-root slash (`C:\`).
-fn normalize_path(input: &str) -> PathBuf {
+pub(crate) fn normalize_path(input: &str) -> PathBuf {
     let trimmed = input
         .trim()
         .trim_matches('"')
@@ -1311,7 +1881,22 @@ fn normalize_path(input: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
+/// Build a non-colliding new folder name in `parent` starting with `base` (e.g. "New Folder (2)").
+fn unique_subfolder_name(parent: &Path, base: &str) -> String {
+    let first = parent.join(base);
+    if !first.exists() {
+        return base.to_string();
+    }
+    for i in 2u32..10_000 {
+        let candidate = format!("{base} ({i})");
+        if !parent.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
+pub(crate) fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
     let mut crumbs: Vec<(String, PathBuf)> = path
         .ancestors()
         .map(|p| {
@@ -1348,4 +1933,125 @@ fn fit_rect_contain(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
     let draw_w = img_w * scale;
     let draw_h = img_h * scale;
     egui::Rect::from_center_size(slot.center(), egui::vec2(draw_w, draw_h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_path() {
+        assert_eq!(normalize_path("  \"C:\\photos\\trip\"  "), PathBuf::from("C:\\photos\\trip"));
+        assert_eq!(normalize_path("C:\\photos\\trip\\"), PathBuf::from("C:\\photos\\trip"));
+        assert_eq!(normalize_path("D:"), PathBuf::from("D:\\"));
+        assert_eq!(normalize_path("D:\\"), PathBuf::from("D:\\"));
+    }
+
+    #[test]
+    fn test_breadcrumbs_splits_hierarchy() {
+        let path = PathBuf::from("C:\\photos\\vacation\\beach");
+        let crumbs = breadcrumbs(&path);
+        let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["C:\\", "photos", "vacation", "beach"]);
+        assert_eq!(crumbs.last().unwrap().1, path);
+    }
+
+    #[test]
+    fn test_unique_subfolder_name() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("photonio_test_{unique_id}"));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // When base doesn't exist yet
+        let name1 = unique_subfolder_name(&temp_dir, "New Folder");
+        assert_eq!(name1, "New Folder");
+
+        // Create "New Folder"
+        let _ = std::fs::create_dir(temp_dir.join("New Folder"));
+        let name2 = unique_subfolder_name(&temp_dir, "New Folder");
+        assert_eq!(name2, "New Folder (2)");
+
+        // Create "New Folder (2)"
+        let _ = std::fs::create_dir(temp_dir.join("New Folder (2)"));
+        let name3 = unique_subfolder_name(&temp_dir, "New Folder");
+        assert_eq!(name3, "New Folder (3)");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_start_with_missing_folder() {
+        let temp_dir = std::env::temp_dir();
+        let non_existent = temp_dir.join("definitely_missing_subfolder_12345");
+        let resolved = resolve_start(Some(non_existent));
+        // It must resolve to an existing directory (its parent temp_dir or higher)
+        assert!(resolved.is_dir());
+        assert_eq!(resolved, temp_dir);
+    }
+
+    #[test]
+    fn test_browser_back_forward_navigation() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("photonio_browser_nav_{unique_id}"));
+        let dir_a = base_dir.join("folder_a");
+        let dir_b = base_dir.join("folder_b");
+        let dir_c = base_dir.join("folder_c");
+        let _ = std::fs::create_dir_all(&dir_a);
+        let _ = std::fs::create_dir_all(&dir_b);
+        let _ = std::fs::create_dir_all(&dir_c);
+
+        let cfg = config::Config::default();
+        let mut browser = Browser::new(dir_a.clone(), &cfg);
+        assert_eq!(browser.current, dir_a);
+        assert!(browser.back_stack.is_empty());
+        assert!(browser.forward_stack.is_empty());
+
+        // Navigate to B, then C
+        browser.navigate(dir_b.clone());
+        assert_eq!(browser.current, dir_b);
+        assert_eq!(browser.back_stack, vec![dir_a.clone()]);
+        assert!(browser.forward_stack.is_empty());
+
+        browser.navigate(dir_c.clone());
+        assert_eq!(browser.current, dir_c);
+        assert_eq!(browser.back_stack, vec![dir_a.clone(), dir_b.clone()]);
+        assert!(browser.forward_stack.is_empty());
+
+        // Navigate back to B
+        assert!(browser.navigate_back());
+        assert_eq!(browser.current, dir_b);
+        assert_eq!(browser.back_stack, vec![dir_a.clone()]);
+        assert_eq!(browser.forward_stack, vec![dir_c.clone()]);
+
+        // Navigate back to A
+        assert!(browser.navigate_back());
+        assert_eq!(browser.current, dir_a);
+        assert!(browser.back_stack.is_empty());
+        assert_eq!(browser.forward_stack, vec![dir_c.clone(), dir_b.clone()]);
+
+        // Cannot navigate back past root history
+        assert!(!browser.navigate_back());
+        assert_eq!(browser.current, dir_a);
+
+        // Navigate forward to B
+        assert!(browser.navigate_forward());
+        assert_eq!(browser.current, dir_b);
+        assert_eq!(browser.back_stack, vec![dir_a.clone()]);
+        assert_eq!(browser.forward_stack, vec![dir_c.clone()]);
+
+        // Branch off: navigate to A again (clears forward stack)
+        browser.navigate(dir_a.clone());
+        assert_eq!(browser.current, dir_a);
+        assert_eq!(browser.back_stack, vec![dir_a.clone(), dir_b.clone()]);
+        assert!(browser.forward_stack.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
 }

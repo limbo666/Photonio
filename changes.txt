@@ -1,0 +1,110 @@
+Here is a comprehensive technical breakdown of all the architectural and feature changes made to the codebase, framed from one systems/GUI programmer to another:
+
+1. Eliminating Console Flicker & Process Spawning
+The Problem: Opening Settings or leaving the app idle caused brief flashes of blank black console windows appearing for ~50ms.
+Root Cause: Background registry inspection and file associations were executed via std::process::Command calling reg.exe or PowerShell scripts. On Windows, spawning console-subsystem executables from a GUI subsystem process automatically attaches a hidden or fleeting conhost.exe console window if not explicitly suppressed.
+The Solution: Replaced all external CLI/script invocations in src/platform/windows.rs with direct Win32 Registry APIs via windows-sys (RegOpenKeyExW, RegQueryValueExW, RegCreateKeyW, RegSetValueExW, RegDeleteKeyW, and RegDeleteTreeW). Registry checks now run in-process on an asynchronous background worker thread (PhotonioApp::start_registry_check), eliminating console popups and IPC overhead.
+2. Smart, Non-Disruptive Folder Refresh
+The Problem: Refreshing a folder or toggling between single-image view and multiview grid mode previously caused UI hitches, flickered the canvas, and broke viewport coordinates (zoom/pan) or thumbnail caches when the file index shifted.
+The Solution:
+Background Scanning: Directory reads run on a detached worker thread via std::sync::mpsc (poll_refresh), leaving the UI event loop running at full FPS.
+Cache Remapping by Canonical Path: Implemented remap_cache_keys and reconcile_caches. Instead of invalidating all decoded RGBA buffers and GPU texture handles in self.full_cache and self.thumb_cache, existing textures are migrated to their new indices in natural sort order (natord).
+Viewport Continuity: If the active image is still in the folder, its zoom, pan, and rotation are retained without re-decoding. If removed, the viewer smoothly steps to the nearest neighbor.
+Seamless View Transitions: Swapping between Single View (ViewMode::Viewer) and Multiview (ViewMode::Grid) kicks off a non-disruptive refresh in the background so newly added files appear without transition latency. Bound to F5 and documented in the Help overlay.
+3. Unified Transient Status Pill & Idle Fadeout
+The Problem: Status messages previously either persisted indefinitely in the HUD, hijacking the filename display, or failed to display in grid view where the HUD bar is hidden.
+The Solution:
+Implemented a unified lifecycle mathematical curve in compute_feedback_alpha: 0.2s fade-in 
+→
+→ 2.0s hold 
+→
+→ 0.6s fade-out (2.8s total), after which the message auto-clears.
+In multiview (ViewMode::Grid) or when the HUD is set to Hidden: Rendered via a dedicated floating glass pill (draw_transient_status_pill).
+In single image view: Rendered inside the HUD bar. If the HUD was faded out due to user idle timeout, posting status feedback resets last_interaction_instant, immediately waking the HUD to 100% opacity.
+Semantic coloring: Successes (ICON_CHECK) render in accent green (SUCCESS_COLOR), while errors render in ERROR_COLOR.
+4. Folder Browser Sanitization & Inline Directory Creation
+The Problem: Deleting a pinned folder or a destination folder for copy/move left broken references, caused empty browser modals with no escape, and failed copy/move operations with raw OS error 3 (ERROR_PATH_NOT_FOUND).
+The Solution in viewer::folder_browser::Browser:
+Missing Pinned Items: The sidebar verifies path.is_dir(). Missing items show amber warning badges (name (missing)) and provide right-click options to either "Remove from Quick Access" or "+ Recreate Folder".
+Dead Folder Fallback Card: Navigating into a deleted directory displays a recovery card with [+ Recreate Folder], [↑ Go to Parent], and [🗑 Remove from Quick Access].
+Address Bar Auto-Creation Prompt: Typing a non-existent path and hitting Enter activates an inline confirmation banner (⚠️ Folder does not exist. [Create & Open] [Cancel]). Pressing Enter again creates the path via fs::create_dir_all.
+Integrated + New Folder Button: Added to the view/filter toolbar strip. Opens an inline creation row with non-colliding default names ("New Folder", "New Folder (2)"), auto-focuses the text field, validates against invalid Windows characters (< > : " / \ | ? *), commits on Enter, and cancels on Escape.
+Footer Validation: The "Select Folder" button is disabled when target.is_dir() is false.
+Copy/Move Action Guard: In src/app.rs, copy_file_to and move_file_to verify directory existence. If deleted, they reset the remembered target, display a toast notice, and fall back to the folder picker.
+5. In-Place File Renaming (F2 & Context Menu)
+The Problem: Renaming files required leaving Photonio to use Windows Explorer.
+The Solution:
+Dual Triggers: Added "Rename File... (F2)" in the context menu (draw_context_menu) and wired F2 in snapshot_input. Operates uniformly in single image view and multiview grid mode.
+Themed Modal Dialog (draw_rename_dialog):
+Auto-focuses the input field and selects the file stem only (0..stem_len via CCursorRange), keeping the extension intact so the user can begin typing immediately.
+Live validation via validate_file_name: guards against empty names, illegal Windows characters, reserved DOS device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9), and file collisions in the target directory.
+Windows Case-Only Rename Safety:
+Windows NTFS is case-preserving but case-insensitive. Standard fs::rename("foo.jpg", "Foo.jpg") can fail or no-op.
+Implemented safe_rename, which renames through a temporary intermediate path with process ID disambiguation on case-only changes.
+Zero-Flicker Texture Continuity:
+remap_cache_keys_with_rename accepts the (old_idx, new_idx) pair. The existing GPU texture is moved directly to the new sorted index, meaning no texture re-allocation, decode lag, or flickering occurs.
+Re-sorts self.files naturally, keeps self.current_index locked to the renamed file, and scrolls it into view in grid mode.
+Status Pill Feedback: Displays ✓ Renamed to <name> or Rename failed: <error> using the transient feedback pill.
+6. Versioning & Test Coverage
+Bumped project version to 0.9.12 in Cargo.toml, Cargo.lock, and README.md.
+Added unit tests covering:
+Cache migration across renames (remap_cache_keys_with_rename_tracks_renamed_item).
+Filename validation and reserved name rejection (validate_file_name_checks_rules).
+Folder browser path normalization and subfolder generation.
+The full test suite (29 tests) passes and the release build compiles with zero warnings.
+
+Photonio v0.9.13 Changes:
+- Settings Screen Redesign:
+  * Strict left-aligned tab buttons (icon + label aligned across all tabs).
+  * Consistent full-width groupboxes across all tabs with unified margins, borders, and headers.
+  * Replaced radio buttons with modern segmented pill controls.
+  * Aligned control options into two-column grids.
+  * Standardized button hierarchy (Primary, Secondary, Accent/Danger).
+  * Darker groupbox background in dark theme for superior contrast and depth.
+  * Dynamically sized content area preventing bottom clipping on the Integration tab.
+- History & Navigation:
+  * Added folder history back/forward navigation stack in folder selection and multiview.
+- Theme Enhancements:
+  * Revised gold accent contrast between Light and Dark themes.
+- Help & Shortcuts Overlay Redesign:
+  * Replaced unstyled Area overlay with modern, centered egui::Window modal and frosted glass frame.
+  * Organized shortcuts into 4 structured groupbox cards: Navigation & Browsing, Viewing & Zoom, File Operations & Tools, and General & Playback.
+  * Added missing modern shortcuts (Folder History Back/Forward Alt+←/Alt+→, Parent Folder Alt+↑, First/Last Home/End, Grid Enter, Animation step [/], etc.).
+  * Rendered shortcut keystrokes using custom <kbd> pill badges with monospace font and subtle borders.
+  * Added design system buttons ("About Photonio" secondary button and "Done" primary button).
+- Image Properties & Metadata Inspector Upgrade:
+  * Wrapped metadata sections in structured groupboxes (General Details, File Details, EXIF / Camera Metadata, Location & Paths).
+  * Styled property grid with muted keys and primary colored values for sharp readability.
+  * Replaced raw legacy buttons with unified design system buttons (Copy Path, Open Containing Folder, Done).
+- Documentation & Specifications Overhaul:
+  * Fully updated README.md and SPEC.md with comprehensive descriptions of all v0.9.13 features, updated shortcuts table, and full 15-module architecture contract.
+
+Photonio v0.9.14 Changes:
+- Multi-View Subfolder Cards & Quad Media Previews:
+  * Subfolder cards in Multi-View thumbnail grid now feature full-tile custom folder graphics with tab, back flap, and front pocket.
+  * Subfolders containing images display a 2x2 media quad preview nested neatly within the front pocket.
+  * Empty subfolders render a clean vector empty-folder symbol.
+  * Configurable toggle "View folders on multi-view" in Settings with instant grid refresh.
+  * Seamless navigation into subfolders with double-click or Enter key, updating breadcrumbs and folder history.
+- Responsive Single-Line Breadcrumb Bar with Overflow Ellipsis:
+  * Replaced multi-line wrapping path bar with a sleek, single-line breadcrumb toolbar.
+  * Dynamic layout calculation measures root button, folder segments, and quick-action buttons against available window width.
+  * When path exceeds available space, automatically collapses intermediate directory segments into an interactive "[ ... ]" dropdown button while preserving root drive and current directory buttons.
+  * Clicking "[ ... ]" opens a dropdown popup menu listing all collapsed parent directories with custom icons for instant jump.
+  * Inline editable text address bar toggled with click or Ctrl + L shortcut.
+- Keyboard Navigation Enhancements:
+  * Added `Backspace` key (alongside `Alt + ↑`) to navigate to parent folder in both Multi-View grid and Viewer.
+  * Added `Ctrl + L` hotkey to quickly focus the address bar for direct typing.
+  * Added `Ctrl + R` for counter-clockwise 90° image rotation (alongside `R` for clockwise rotation).
+  * Reassigned `Ctrl + S` to save pending rotations in-place, and `Ctrl + Shift + S` for Save As copy.
+- Lossless Rotation & Pulsing Breathing Save Indicator:
+  * Rotating an image with `R` or `Ctrl + R` instantly marks a pending in-place rotation.
+  * When a rotation is pending, a pulsing "breathing" Save icon appears in the quick-action toolbar with smooth sine-wave glowing accent animation.
+  * Clicking the breathing Save button or pressing `Ctrl + S` performs an immediate in-place lossless overwrite and clears the pending state.
+- Support CTA Link Enhancement:
+  * The periodic floating support button (shown every ~10 launches) is now rendered as an active hyperlink directly opening the donation page.
+  * Sets pointing hand cursor (`CursorIcon::PointingHand`) on hover for clear visual affordance.
+- Help & Shortcuts Modal Completeness:
+  * Verified and updated all shortcut tables across all 4 sections in the in-app Help dialog to include all current keys (`Ctrl + L`, `Backspace / Alt + ↑`, `Ctrl + R`, `Ctrl + S`, `Ctrl + Shift + S`, grid zoom controls).
+- Documentation Updates:
+  * Synchronized version to v0.9.14 across `Cargo.toml`, `Cargo.lock`, `README.md`, `SPEC.md`, and `changes.txt`.

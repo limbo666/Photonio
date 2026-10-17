@@ -134,6 +134,12 @@ pub struct Config {
     pub pinned_folders: Vec<PathBuf>,
     /// Number of application launches (drives the periodic donation CTA).
     pub launch_count: u64,
+    /// Whether Ctrl+Wheel / Ctrl+±/0 adjusts the MultiView grid tile size.
+    pub adjustable_grid_tile_size: bool,
+    /// Width of each MultiView grid tile in logical points (80..=300).
+    pub grid_tile_size: f32,
+    /// Whether to show subfolders in MultiView grid. Defaults to true.
+    pub multiview_show_folders: bool,
 }
 
 impl Default for Config {
@@ -171,6 +177,9 @@ impl Default for Config {
             folder_show_files: true,
             pinned_folders: Vec::new(),
             launch_count: 0,
+            adjustable_grid_tile_size: true,
+            grid_tile_size: 150.0,
+            multiview_show_folders: true,
         }
     }
 }
@@ -221,6 +230,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
 
     #[test]
     fn round_trips_through_json() {
@@ -269,6 +280,9 @@ mod tests {
             decoded.pinned_folders,
             vec![PathBuf::from("C:/pics"), PathBuf::from("C:/pics/family")]
         );
+        assert!(decoded.adjustable_grid_tile_size);
+        assert!((decoded.grid_tile_size - 150.0).abs() < f32::EPSILON);
+        assert!(decoded.multiview_show_folders);
     }
 
     #[test]
@@ -299,5 +313,8 @@ mod tests {
         assert!(decoded.folder_show_files);
         assert!(decoded.pinned_folders.is_empty());
         assert_eq!(decoded.launch_count, 0);
+        assert!(decoded.adjustable_grid_tile_size);
+        assert!((decoded.grid_tile_size - 150.0).abs() < f32::EPSILON);
+        assert!(decoded.multiview_show_folders);
     }
 }

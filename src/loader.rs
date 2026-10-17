@@ -16,13 +16,43 @@ use crate::viewer;
 
 /// Display-side cap for cached textures (matches egui's default GPU limit).
 const DISPLAY_MAX_SIDE: u32 = 2048;
-/// Square thumbnail target size.
-const THUMB_SIZE: u32 = 96;
 /// Hard cap on queued thumbnail requests; older requests are dropped.
-const THUMB_QUEUE_CAP: usize = 8;
-/// Bounded prefix read for EXIF-thumbnail extraction (avoids reading a huge
-/// file just to make a 96px tile).
-const THUMB_PREFIX_LIMIT: usize = 128 * 1024;
+const THUMB_QUEUE_CAP: usize = 32;
+/// Bounded prefix read for EXIF-thumbnail extraction.
+const THUMB_PREFIX_LIMIT: usize = 256 * 1024;
+
+/// Level-of-detail tier for grid thumbnails & previews.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub enum PreviewLod {
+    /// Fast standard thumbnail (~384px), suitable for small grid tiles & filmstrip.
+    Small = 0,
+    /// Medium resolution preview (~640px), sharp for mid-sized grid tiles.
+    Medium = 1,
+    /// High resolution preview (~1024px), razor sharp for large tiles on 1080p/4K/Retina displays.
+    Large = 2,
+}
+
+impl PreviewLod {
+    pub fn target_size(self) -> u32 {
+        match self {
+            Self::Small => 384,
+            Self::Medium => 640,
+            Self::Large => 1024,
+        }
+    }
+
+    /// Determine the required LOD based on tile width and display scale factor.
+    pub fn from_tile_width(tile_width: f32, pixels_per_point: f32) -> Self {
+        let pixels = tile_width * pixels_per_point.max(1.0);
+        if pixels <= 260.0 {
+            Self::Small
+        } else if pixels <= 460.0 {
+            Self::Medium
+        } else {
+            Self::Large
+        }
+    }
+}
 
 pub struct Request {
     pub generation: u64,
@@ -31,7 +61,7 @@ pub struct Request {
 
 pub enum RequestKind {
     Full { index: usize, path: PathBuf, len: usize },
-    Thumb { index: usize, path: PathBuf },
+    Thumb { index: usize, path: PathBuf, lod: PreviewLod },
 }
 
 pub struct Response {
@@ -76,8 +106,8 @@ pub enum ResponseKind {
     /// The full decode was coalesced away during fast navigation. The app
     /// must clear its pending flag so it can re-request if still needed.
     FullSkipped { index: usize },
-    Thumb { index: usize, rgba: Vec<u8>, dims: [usize; 2] },
-    ThumbFailed { index: usize },
+    Thumb { index: usize, rgba: Vec<u8>, dims: [usize; 2], lod: PreviewLod },
+    ThumbFailed { index: usize, lod: PreviewLod },
 }
 
 pub struct Loader {
@@ -147,12 +177,13 @@ impl Loader {
                 if stale(&thumb_generation, generation) {
                     continue;
                 }
-                let RequestKind::Thumb { index, path } = kind else {
+                let RequestKind::Thumb { index, path, lod } = kind else {
                     continue;
                 };
-                let kind = match decode_thumb(&path) {
-                    Ok((rgba, dims)) => ResponseKind::Thumb { index, rgba, dims },
-                    Err(_) => ResponseKind::ThumbFailed { index },
+                let target_size = lod.target_size();
+                let kind = match decode_thumb(&path, target_size) {
+                    Ok((rgba, dims)) => ResponseKind::Thumb { index, rgba, dims, lod },
+                    Err(_) => ResponseKind::ThumbFailed { index, lod },
                 };
                 let _ = resp_tx.send(Response { generation, kind });
                 thumb_worker_ctx.request_repaint();
@@ -185,14 +216,14 @@ impl Loader {
         });
     }
 
-    /// Best-effort thumbnail request. Returns `true` if it was queued, or
+    /// Best-effort thumbnail request for a specific LOD. Returns `true` if it was queued, or
     /// `false` if the bounded queue was full (caller should retry later).
-    pub fn request_thumb(&self, index: usize, path: PathBuf) -> bool {
+    pub fn request_thumb(&self, index: usize, path: PathBuf, lod: PreviewLod) -> bool {
         let generation = self.generation.load(Ordering::SeqCst);
         self.thumb_tx
             .try_send(Request {
                 generation,
-                kind: RequestKind::Thumb { index, path },
+                kind: RequestKind::Thumb { index, path, lod },
             })
             .is_ok()
     }
@@ -301,22 +332,25 @@ fn decode_full(path: &Path) -> Result<DecodedFull, String> {
     Ok(DecodedFull::Static { rgba, display, full })
 }
 
-fn decode_thumb(path: &Path) -> Result<(Vec<u8>, [usize; 2]), String> {
+fn decode_thumb(path: &Path, target_size: u32) -> Result<(Vec<u8>, [usize; 2]), String> {
     // Fast path: read only a bounded prefix and use the embedded EXIF thumbnail
-    // (a few KB) instead of decompressing the whole multi-megapixel image.
-    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut prefix = vec![0u8; THUMB_PREFIX_LIMIT];
-    let n = file.read(&mut prefix).map_err(|e| e.to_string())?;
-    prefix.truncate(n);
-
-    if let Some(thumb) = viewer::embedded_thumbnail(&prefix, THUMB_SIZE) {
-        let dims = [thumb.width() as usize, thumb.height() as usize];
-        return Ok((thumb.to_rgba8().into_raw(), dims));
+    // (a few KB) for small previews instead of decompressing the whole multi-megapixel image.
+    if target_size <= 384 {
+        if let Ok(mut file) = std::fs::File::open(path) {
+            let mut prefix = vec![0u8; THUMB_PREFIX_LIMIT];
+            if let Ok(n) = file.read(&mut prefix) {
+                prefix.truncate(n);
+                if let Some(thumb) = viewer::embedded_thumbnail(&prefix, target_size) {
+                    let dims = [thumb.width() as usize, thumb.height() as usize];
+                    return Ok((thumb.to_rgba8().into_raw(), dims));
+                }
+            }
+        }
     }
 
-    // Fallback (rare): no EXIF thumbnail — full read + bounded full decode.
+    // High quality decode: decode actual image scaled crisply to target_size.
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let thumb = viewer::decode_thumbnail(&bytes, THUMB_SIZE)?;
+    let thumb = viewer::decode_thumbnail(&bytes, target_size)?;
     let dims = [thumb.width() as usize, thumb.height() as usize];
     Ok((thumb.to_rgba8().into_raw(), dims))
 }
