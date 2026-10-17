@@ -1604,7 +1604,12 @@ impl PhotonioApp {
     /// Open the custom folder browser for a given operation.
     fn open_folder_browser(&mut self, op: PendingOperation) {
         let remembered = match op {
-            PendingOperation::OpenFolder => self.config.last_open_folder.clone(),
+            // Start the "Open Folder" browser at the folder currently being
+            // browsed (kept in sync by Multi-View folder navigation), falling
+            // back to the last folder picked through the browser itself.
+            PendingOperation::OpenFolder => self
+                .current_folder()
+                .or_else(|| self.config.last_open_folder.clone()),
             PendingOperation::CopyFileTo => self.config.last_copy_folder.clone(),
             PendingOperation::MoveFileTo => self.config.last_move_folder.clone(),
         };
@@ -1877,6 +1882,10 @@ impl PhotonioApp {
     fn reveal_current(&self) {
         if let Some(path) = self.current_file() {
             platform::reveal_in_explorer(path);
+        } else if let Some(dir) = self.current_folder() {
+            // No image is selected (e.g. browsing an empty folder in Multi-View):
+            // open the active folder itself in Explorer instead of doing nothing.
+            platform::open_folder(&dir);
         }
     }
 
