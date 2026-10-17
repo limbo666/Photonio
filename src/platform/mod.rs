@@ -6,11 +6,74 @@ use std::os::windows::ffi::OsStrExt; // UTF-16 encoding for Win32 wide-string AP
 use std::path::Path;
 
 /// Reveal `path` in Windows Explorer, pre-selecting the file.
-/// `/select,` must stay glued to the path as a single argument.
+///
+/// Uses the Shell COM API (`SHOpenFolderAndSelectItems`) rather than the
+/// `explorer.exe /select,<path>` command line. Explorer does not parse its
+/// command line with the usual MSVC quoting rules: once the path contains a
+/// space, `Command::arg` wraps the whole `/select,<path>` argument in quotes
+/// and Explorer silently falls back to opening the default shell folder
+/// (Documents). Selecting through COM involves no command-line parsing.
 pub fn reveal_in_explorer(path: &Path) {
-    let _ = std::process::Command::new("explorer.exe")
-        .arg(format!("/select,{}", path.display()))
-        .spawn();
+    use windows_sys::Win32::UI::Shell::{
+        Common::ITEMIDLIST, ILFindLastID, ILFree, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    };
+
+    let Some(parent) = path.parent() else {
+        return;
+    };
+
+    let item_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let folder_wide: Vec<u16> = parent
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `SHParseDisplayName` allocates PIDLs with the shell allocator and
+    // `ILFree` releases them; the wide buffers are NUL-terminated and outlive
+    // the calls. Every pointer passed is valid for the duration of the call.
+    let opened = unsafe {
+        let mut item: *mut ITEMIDLIST = std::ptr::null_mut();
+        if SHParseDisplayName(
+            item_wide.as_ptr(),
+            std::ptr::null_mut(),
+            &mut item,
+            0,
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            false
+        } else {
+            let mut folder: *mut ITEMIDLIST = std::ptr::null_mut();
+            let ok = SHParseDisplayName(
+                folder_wide.as_ptr(),
+                std::ptr::null_mut(),
+                &mut folder,
+                0,
+                std::ptr::null_mut(),
+            ) == 0;
+            if ok {
+                // `ILFindLastID` yields the file's ID relative to its parent.
+                let child: *const ITEMIDLIST = ILFindLastID(item);
+                SHOpenFolderAndSelectItems(folder, 1, &child, 0);
+            }
+            ILFree(item);
+            if !folder.is_null() {
+                ILFree(folder);
+            }
+            ok
+        }
+    };
+
+    // Extremely unusual parse failure: fall back to opening the containing
+    // folder so the user still lands in the right place.
+    if !opened {
+        open_folder(parent);
+    }
 }
 
 /// Open the Windows "How do you want to open this file?" dialog.
