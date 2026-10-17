@@ -108,3 +108,11 @@ Photonio v0.9.14 Changes:
   * Verified and updated all shortcut tables across all 4 sections in the in-app Help dialog to include all current keys (`Ctrl + L`, `Backspace / Alt + ↑`, `Ctrl + R`, `Ctrl + S`, `Ctrl + Shift + S`, grid zoom controls).
 - Documentation Updates:
   * Synchronized version to v0.9.14 across `Cargo.toml`, `Cargo.lock`, `README.md`, `SPEC.md`, and `changes.txt`.
+
+Photonio v0.9.15 Changes:
+- Active Folder Targeting After Multi-View Navigation:
+  * "Open Containing Folder" (Ctrl+E) now opens the active folder in Explorer when no image is selected (previously did nothing on empty folders).
+  * The "Open Folder" browser now starts at the folder currently being browsed instead of a stale last-browser-selection location.
+- Explorer Reveal Reliability Fix:
+  * Replaced `explorer.exe /select,<path>` with the Shell COM API (SHOpenFolderAndSelectItems), which has no command-line parsing and correctly reveals files whose paths contain spaces or non-ASCII characters.
+  * Previously, any path containing a space caused Explorer to silently fall back to opening the default shell folder (Documents).

@@ -1,7 +1,7 @@
 # Project Specification: Photonio (Rust)
 **Target:** Lightweight, high-performance, distraction-free desktop image viewer with glassmorphic aesthetics.
 **Target OS:** Windows 10 / 11 (x64)
-**Current Version:** v0.9.14
+**Current Version:** v0.9.15
 
 ## 1. Guiding Principles
 - **Minimalist & Distraction-Free:** No heavy ribbon bars or multi-tiered legacy menus. Pure canvas with floating frosted glass HUD, toolbar pill, and contextual overlays.

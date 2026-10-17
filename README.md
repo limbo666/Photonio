@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-2ea44f" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-v0.9.14-3b82f6" alt="Version v0.9.14">
+  <img src="https://img.shields.io/badge/version-v0.9.15-3b82f6" alt="Version v0.9.15">
 </p>
 
 **A high-performance, lightweight, glassmorphic image viewer for Windows 10/11 — built in pure Rust with `egui`/`eframe`.**
