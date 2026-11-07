@@ -7,6 +7,8 @@ use std::path::Path;
 
 use image::ImageDecoder;
 
+use crate::filesystem::{format_name, format_size};
+
 /// A key/value row for the properties grid (key is a static label).
 pub type Row = (&'static str, String);
 
@@ -88,44 +90,19 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
     a
 }
 
-/// Human-readable file size, e.g. `2.4 MB`.
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// Display format name derived from the file extension.
-fn format_name(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
-    match ext.as_deref() {
-        Some("png") => "PNG".into(),
-        Some("jpg") | Some("jpeg") | Some("jfif") => "JPEG".into(),
-        Some("webp") => "WebP".into(),
-        Some("bmp") => "BMP".into(),
-        Some("gif") => "GIF".into(),
-        Some("ico") => "ICO".into(),
-        Some("tif") | Some("tiff") => "TIFF".into(),
-        Some(other) => other.to_uppercase(),
-        None => "Unknown".into(),
-    }
-}
-
 /// Original pixel format / bit depth, read from the image header (cheap — no
 /// full decode). Falls back to `RGBA 8-bit` when the header can't be read.
 fn color_description(path: &Path) -> String {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    if ext == "svg" || ext == "svgz" {
+        return "Vector Graphic (RGBA 8-bit)".to_string();
+    }
+    if ext == "jxl" {
+        return "JPEG XL (RGBA 8-bit)".to_string();
+    }
+    if ext == "avif" {
+        return "AV1 Image (RGBA 8-bit)".to_string();
+    }
     let Ok(reader) = image::ImageReader::open(path) else {
         return "RGBA 8-bit".to_string();
     };

@@ -20,6 +20,12 @@ pub const ICON_BOLT: &str = "\u{f0e7}"; // bolt (Settings → Quick-Pills)
 pub const ICON_GEAR: &str = "\u{f013}"; // gear (Settings → Behavior)
 pub const ICON_PUZZLE: &str = "\u{f12e}"; // puzzle-piece (Settings → Integration)
 pub const ICON_INFO: &str = "\u{f05a}"; // circle-info (Image Properties)
+pub const ICON_CROP: &str = "\u{f125}"; // crop
+pub const ICON_ARROWS_ROTATE: &str = "\u{f021}"; // arrows-rotate / swap
+#[allow(dead_code)]
+pub const ICON_SORT: &str = "\u{f0dc}"; // sort (arrows-up-down)
+pub const ICON_SORT_UP: &str = "\u{f0de}"; // sort-up
+pub const ICON_SORT_DOWN: &str = "\u{f0dd}"; // sort-down
 pub const ICON_COPY: &str = "\u{f0c5}"; // copy (copy path/folder to clipboard)
 #[allow(dead_code)]
 pub const ICON_ARROW_LEFT: &str = "\u{f060}"; // arrow-left (navigation back)
@@ -32,5 +38,7 @@ pub const ICON_IMAGE: &str = "\u{f03e}"; // image (folder-open toast image count
 pub const ICON_PIN: &str = "\u{f08d}"; // thumbtack (pin to Quick Access)
 pub const ICON_PLUS: &str = "\u{f067}"; // plus (new folder, add item)
 pub const ICON_XMARK: &str = "\u{f00d}"; // xmark (cancel, dismiss)
+pub const ICON_GRIP_VERTICAL: &str = "\u{f58e}"; // grip-vertical (draggable overlay handle)
+pub const ICON_GRIP_HORIZONTAL: &str = "\u{f58d}"; // grip-horizontal (draggable overlay handle, rotated)
 pub const ICON_PAYPAL: &str = "\u{f1ed}"; // paypal brand (donation CTA)
 

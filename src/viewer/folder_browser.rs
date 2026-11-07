@@ -10,7 +10,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 use eframe::egui;
 
-use crate::{config, icons, platform, theme, viewer};
+use crate::{config, filesystem, icons, platform, theme, viewer};
 
 /// Max files listed in one folder (older items are truncated).
 const MAX_FILES: usize = 2000;
@@ -1911,20 +1911,7 @@ pub(crate) fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
     crumbs
 }
 
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
+use filesystem::format_size;
 
 fn fit_rect_contain(dims: [usize; 2], slot: egui::Rect) -> egui::Rect {
     let img_w = dims[0].max(1) as f32;

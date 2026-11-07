@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-2ea44f" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-v0.9.15-3b82f6" alt="Version v0.9.15">
+  <img src="https://img.shields.io/badge/version-v0.9.17-3b82f6" alt="Version v0.9.17">
 </p>
 
 **A high-performance, lightweight, glassmorphic image viewer for Windows 10/11 — built in pure Rust with `egui`/`eframe`.**
@@ -27,15 +27,19 @@ Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no
 - **Fast, non-blocking loading** — full-res and thumbnail decoders run on separate worker threads with circular ring preloading and priority scheduling so the active image is always decoded first.
 - **Multi-View Thumbnail Grid & Subfolder Explorer** — toggle seamlessly between single-image canvas and virtualized multi-view grid (`Enter` or double-click canvas), featuring interactive breadcrumbs with overflow `"..."` dropdown, direct path editing (`Ctrl + L`), live folder scanning, and subfolder cards with 2x2 media quad previews.
 - **In-App Custom Folder Browser with Covers** — modern folder selector dialog with Quick Access pinned folders, full folder history navigation, dynamic folder cover previews generated from subfolder images, inline directory creation (`+ New Folder`), and theme-adaptive gold accents.
+- **Ultimate Interactive Crop Tool** — visual on-canvas cropping (`C`) with 8 drag handles, freeform and fixed aspect ratio presets (1:1, 16:9, 4:3, 3:2, Original), portrait/landscape orientation swap, composition guide overlays (Rule of Thirds & Center Grid), direct pixel-exact numeric inputs, arrow-key nudging, in-memory apply (`Enter`), lossless overwrite (`Ctrl + S`), save copy (`Ctrl + Shift + S`), and direct clipboard export. Features a dedicated detached workspace with smart margins, bottom-docked tool controls, and background HUD suppression so the crop boundaries and resize handles are 100% visible and unoccluded.
 - **Folder History & Navigation** — traversal stack with Back (`Alt + ←`) and Forward (`Alt + →`) navigation across previously visited directories in both viewer and grid modes, plus parent folder jump (`Backspace` / `Alt + ↑`).
+- **Selectable Folder Sorting & Navigation Order** — navigate collections by **Name (Alphabetical)**, **Date Modified**, or **File Size**, in either **Ascending** or **Descending** order. Instantly selectable via the MultiView grid header, right-click context menu, or Settings (`Ctrl + ,`), with non-blocking cache reconciliation and persistent preference storage.
 - **Lossless In-Place Rotation with Breathing Quick-Action Save** — fast 90° clockwise (`R`) and counter-clockwise (`Ctrl + R`) rotations with instant visual feedback; pending rotations trigger a pulsing breathing Save icon in the quick-action toolbar, overwriting losslessly with `Ctrl + S` or saving a copy with `Ctrl + Shift + S`.
 - **Safe In-Place File Renaming** — inline modal (`F2` or context menu) with live Windows file-naming validation, DOS reserved name rejection (CON, PRN, AUX, etc.), NTFS case-only rename safety, and zero-flicker GPU texture remapping.
 - **Image Resizer** — customizable resizing utility (`Ctrl + Shift + R`) with aspect ratio lock, percentage or pixel scaling, 5 interpolation filters (Lanczos3, Gaussian, Catmull-Rom, Triangle, Nearest), and real-time file size estimation.
 - **Comprehensive EXIF & Metadata Inspector** — in-depth properties modal (`I`) displaying resolution, aspect ratio, megapixels, color depth, timestamps, camera make/model, lens, exposure time, F-number, ISO, and GPS coordinates.
-- **Broad format support** — JPEG (including `.jfif`), PNG, BMP, GIF, TIFF, WebP, and ICO, with EXIF orientation applied automatically.
+- **Broad format support** — JPEG (including `.jfif`), PNG, BMP, GIF, TIFF, WebP, AVIF, ICO, TGA, SVG / SVGZ, and JPEG XL (JXL), with EXIF orientation applied automatically.
 - **Animated playback** — multi-frame **GIF** and **Animated WebP** play, loop, pause (`Space`), and step frame-by-frame (`[` / `]`).
 - **Dynamic filmstrip** — 4-way docking (Bottom / Top / Left / Right), aspect-ratio-preserving thumbnails, and a hotkey toggle (`T`).
-- **Quick-Action Pill** — a customizable top-right icon toolbar (Open File, Open Folder, Save As, Print, Share, Toggle Filmstrip) with horizontal or vertical layouts, plus pulsing rotation save indicator.
+- **Draggable Overlays with Closest-Edge Anchoring** — floating controls (Quick-Action Tool Pill and Crop Toolbar) feature dedicated tactile grip handles (`⋮⋮` vertical and `···` horizontal). User-positioned overlays automatically anchor to their closest screen edge or corner (Top-Left, Top-Right, Bottom-Left, Bottom-Right) and maintain their relative distance across window resizes, with instant double-click reset and persistent storage.
+- **Quick-Action Pill** — a customizable icon toolbar (Open File, Open Folder, Save As, Print, Share, Toggle Filmstrip) with horizontal or vertical layouts, naturally rotated grip handle, plus pulsing rotation save indicator.
+- **Native Windows Drag-and-Drop Out** — drag images or folders directly out of Photonio into external Windows applications (Desktop, Windows File Explorer, Photoshop, MS Paint, Discord, Chrome, etc.). Panning remains 100% active when zoomed in, while fit-to-window view, MultiView grid thumbnails, and filmstrip tiles support instantaneous OLE drag-out with a 6px deadzone threshold.
 - **Windows shell integration** — portable `HKCU` default-app registration (no admin), an Explorer folder context menu ("Open folder with Photonio"), CLI / double-click argument support, and in-process Win32 registry health checking with portable-path mismatch detection.
 - **Frosted Glassmorphic theme** — translucent frosted panels with configurable opacity, dynamic Light / Dark / Glass canvas backgrounds, high-contrast theme-adaptive gold accents, and Font Awesome 7 Solid iconography.
 - **Persistence** — remembers the exact last-viewed image, its folder, window geometry, and all settings in `%APPDATA%\Photonio\config.json`.
@@ -45,14 +49,18 @@ Photonio puts your images on a clean, unobstructed canvas — no ribbon bars, no
 | Format | Extensions | Notes |
 | --- | --- | --- |
 | JPEG | `.jpg` `.jpeg` `.jfif` | EXIF auto-rotation |
-| PNG | `.png` | |
-| GIF | `.gif` | Animated playback |
-| WebP | `.webp` | Animated playback |
-| BMP | `.bmp` | |
-| TIFF | `.tif` `.tiff` | |
-| ICO | `.ico` | |
+| PNG | `.png` | Lossless raster |
+| GIF | `.gif` | Multi-frame animated playback |
+| WebP | `.webp` | Still and animated playback |
+| AVIF | `.avif` | Next-generation AV1 web image format |
+| BMP | `.bmp` | Windows Bitmap |
+| TIFF | `.tif` `.tiff` | Multi-page / high bit-depth |
+| ICO | `.ico` | Multi-resolution icon |
+| TGA | `.tga` | Truevision TARGA (game textures & digital art) |
+| SVG | `.svg` `.svgz` | Scalable Vector Graphics (plain & compressed) |
+| JPEG XL | `.jxl` | Next-generation high-efficiency image format |
 
-Windows Explorer file association is registered for `.jpg`, `.jpeg`, `.jfif`, `.png`, `.webp`, `.bmp`, `.gif`, and `.tiff`.
+Windows Explorer file association is registered for `.jpg`, `.jpeg`, `.jfif`, `.png`, `.webp`, `.avif`, `.bmp`, `.gif`, `.tiff`, `.tga`, `.svg`, `.svgz`, and `.jxl`.
 
 ## Keyboard shortcuts
 
@@ -86,6 +94,7 @@ Windows Explorer file association is registered for `.jpg`, `.jpeg`, `.jfif`, `.
 ### File Operations & Tools
 | Action | Keys |
 | --- | --- |
+| Crop image | `C` |
 | Image properties / EXIF | `I` |
 | Resize image | `Ctrl` + `Shift` + `R` |
 | Rename file | `F2` |
@@ -150,11 +159,12 @@ Configured in **Settings** (`Ctrl+,`) with a modern tabbed layout and persisted 
 | Path | Purpose |
 | --- | --- |
 | `src/main.rs` | Entry point, CLI argument ingestion, window lifecycle |
-| `src/app.rs` | UI state, event handling, HUD, pill, filmstrip, grid mode, modals |
+| `src/app/mod.rs` | UI state machine, event dispatch, and application lifecycle orchestrator |
+| `src/app/` | UI submodules: `types`, `widgets`, `breadcrumbs`, `cache`, `dialogs/`, `hud`, `filmstrip`, `grid`, `context_menu` |
 | `src/viewer/mod.rs` | Texture cache, animation playback, zoom/pan coordinate transformation |
 | `src/viewer/folder_browser.rs` | In-app folder browser dialog, covers, quick access, breadcrumbs |
 | `src/viewer/metadata.rs` | File & camera EXIF metadata extraction |
-| `src/viewer/resizer.rs` | Image resampling and scaling algorithms (Lanczos3, Gaussian, etc.) |
+| `src/viewer/resize.rs` | Image resampling and scaling algorithms (Lanczos3, Gaussian, etc.) |
 | `src/filesystem/mod.rs` | Directory scan, natural sort (natord), watcher, safe rename |
 | `src/platform/mod.rs` | Windows shell (wallpaper, Explorer, print, clipboard) |
 | `src/platform/windows.rs` | Win32 registry: HKCU default-app & folder context-menu integration |

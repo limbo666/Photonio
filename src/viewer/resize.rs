@@ -48,10 +48,43 @@ pub fn rotate(img: &DynamicImage, degrees: u32) -> DynamicImage {
     }
 }
 
+/// Crop `img` to the exact pixel rectangle `[x, y, width, height]`.
+/// Clamps bounds defensively against overflows.
+pub fn crop_exact(img: &DynamicImage, x: u32, y: u32, width: u32, height: u32) -> DynamicImage {
+    let src_w = img.width();
+    let src_h = img.height();
+    if src_w == 0 || src_h == 0 || width == 0 || height == 0 {
+        return img.clone();
+    }
+    let x = x.min(src_w.saturating_sub(1));
+    let y = y.min(src_h.saturating_sub(1));
+    let width = width.min(src_w - x).max(1);
+    let height = height.min(src_h - y).max(1);
+    img.crop_imm(x, y, width, height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn crop_exact_crops_subregion_correctly() {
+        let mut raw = RgbaImage::new(100, 100);
+        raw.put_pixel(10, 10, Rgba([255, 0, 0, 255]));
+        let src = DynamicImage::ImageRgba8(raw);
+        let cropped = crop_exact(&src, 10, 10, 50, 40);
+        assert_eq!((cropped.width(), cropped.height()), (50, 40));
+        assert_eq!(cropped.to_rgba8().get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn crop_exact_clamps_out_of_bounds() {
+        let raw = RgbaImage::new(100, 100);
+        let src = DynamicImage::ImageRgba8(raw);
+        let cropped = crop_exact(&src, 80, 80, 50, 50);
+        assert_eq!((cropped.width(), cropped.height()), (20, 20));
+    }
 
     #[test]
     fn cover_crop_centers_and_crops_to_target() {

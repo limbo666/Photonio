@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 /// What the mouse wheel does when no modifier is held.
@@ -71,6 +72,123 @@ pub enum ContentFilter {
     All,
 }
 
+/// Criteria used to sort image files in folders.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSortCriteria {
+    #[default]
+    Name,
+    DateModified,
+    Size,
+}
+
+impl FileSortCriteria {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::DateModified => "Date Modified",
+            Self::Size => "Size",
+        }
+    }
+}
+
+/// Direction for file sorting.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Ascending => "Ascending",
+            Self::Descending => "Descending",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn toggle(&self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+}
+
+/// Screen-edge relative anchor for floating overlays (Tool Pill, Crop Toolbar).
+/// Anchors to the closest edges (Left vs. Right, Top vs. Bottom) with the
+/// corresponding offset distance, ensuring the control maintains its relative
+/// position when the window is resized.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct OverlayAnchor {
+    pub from_right: bool,
+    pub from_bottom: bool,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl OverlayAnchor {
+    pub fn new(from_right: bool, from_bottom: bool, offset_x: f32, offset_y: f32) -> Self {
+        Self {
+            from_right,
+            from_bottom,
+            offset_x: offset_x.max(8.0),
+            offset_y: offset_y.max(8.0),
+        }
+    }
+
+    /// Compute edge anchor from the panel's bounding rect and the visible screen rect.
+    pub fn from_panel_and_screen(panel_rect: egui::Rect, screen: egui::Rect) -> Self {
+        let center = panel_rect.center();
+        let screen_center = screen.center();
+        let from_right = center.x >= screen_center.x;
+        let from_bottom = center.y >= screen_center.y;
+
+        let offset_x = if from_right {
+            (screen.max.x - panel_rect.max.x).max(8.0)
+        } else {
+            (panel_rect.min.x - screen.min.x).max(8.0)
+        };
+
+        let offset_y = if from_bottom {
+            (screen.max.y - panel_rect.max.y).max(8.0)
+        } else {
+            (panel_rect.min.y - screen.min.y).max(8.0)
+        };
+
+        Self {
+            from_right,
+            from_bottom,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    /// Returns the egui alignment and screen-clamped offset vector for `Area::anchor`.
+    pub fn to_align_and_offset(&self, screen: egui::Rect) -> (egui::Align2, egui::Vec2) {
+        let align = match (self.from_right, self.from_bottom) {
+            (false, false) => egui::Align2::LEFT_TOP,
+            (true, false) => egui::Align2::RIGHT_TOP,
+            (false, true) => egui::Align2::LEFT_BOTTOM,
+            (true, true) => egui::Align2::RIGHT_BOTTOM,
+        };
+
+        let max_x = (screen.width() - 40.0).max(8.0);
+        let max_y = (screen.height() - 40.0).max(8.0);
+        let eff_x = self.offset_x.clamp(8.0, max_x);
+        let eff_y = self.offset_y.clamp(8.0, max_y);
+
+        let signed_x = if self.from_right { -eff_x } else { eff_x };
+        let signed_y = if self.from_bottom { -eff_y } else { eff_y };
+
+        (align, egui::vec2(signed_x, signed_y))
+    }
+}
+
 /// Persisted state: settings + last directory + window geometry.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -87,6 +205,10 @@ pub struct Config {
     pub remember_last_folder: bool,
     /// Wrap navigation around at the folder boundaries.
     pub loop_navigation: bool,
+    /// Active file sort criteria for browsing folders (Name, DateModified, Size).
+    pub sort_criteria: FileSortCriteria,
+    /// Active file sort direction (Ascending or Descending).
+    pub sort_direction: SortDirection,
     /// Wheel behavior without a modifier.
     pub mouse_wheel_action: MouseWheelAction,
     /// Start the app in fullscreen.
@@ -103,6 +225,11 @@ pub struct Config {
     pub filmstrip_position: FilmstripPosition,
     /// Master toggle for the top-right quick-action pill.
     pub quick_pill_enabled: bool,
+    /// Optional user-dragged position `[x, y]` for the quick-action tool pill.
+    pub quick_pill_pos: Option<[f32; 2]>,
+    /// Closest-edge relative anchor for the quick-action tool pill.
+    #[serde(default)]
+    pub quick_pill_anchor: Option<OverlayAnchor>,
     /// Individual quick-action pill button visibility.
     pub pill_open_file: bool,
     pub pill_open_folder: bool,
@@ -151,6 +278,8 @@ impl Default for Config {
             window_size: None,
             remember_last_folder: true,
             loop_navigation: true,
+            sort_criteria: FileSortCriteria::Name,
+            sort_direction: SortDirection::Ascending,
             mouse_wheel_action: MouseWheelAction::Navigate,
             start_fullscreen: false,
             canvas_background: CanvasBackground::Light,
@@ -159,6 +288,8 @@ impl Default for Config {
             show_filmstrip: false,
             filmstrip_position: FilmstripPosition::Bottom,
             quick_pill_enabled: true,
+            quick_pill_pos: None,
+            quick_pill_anchor: None,
             pill_open_file: true,
             pill_open_folder: true,
             pill_save_as: true,

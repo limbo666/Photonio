@@ -77,6 +77,34 @@ impl ViewerImage {
         self.texture = ctx.load_texture("photonio-image", color, egui::TextureOptions::LINEAR);
     }
 
+    /// Crop the displayed image in place to `[x, y, width, height]`.
+    pub fn crop_in_place(&mut self, ctx: &egui::Context, x: u32, y: u32, width: u32, height: u32) {
+        let Some(img) = image::RgbaImage::from_raw(
+            self.display[0] as u32,
+            self.display[1] as u32,
+            std::mem::take(&mut self.rgba),
+        ) else {
+            return;
+        };
+        let w = img.width();
+        let h = img.height();
+        if w == 0 || h == 0 || width == 0 || height == 0 {
+            self.rgba = img.into_raw();
+            return;
+        }
+        let x = x.min(w.saturating_sub(1));
+        let y = y.min(h.saturating_sub(1));
+        let width = width.min(w - x).max(1);
+        let height = height.min(h - y).max(1);
+        let cropped = image::imageops::crop_imm(&img, x, y, width, height).to_image();
+        self.display = [cropped.width() as usize, cropped.height() as usize];
+        self.rgba = cropped.into_raw();
+        self.dimensions = self.display;
+
+        let color = egui::ColorImage::from_rgba_unmultiplied(self.display, &self.rgba);
+        self.texture = ctx.load_texture("photonio-image", color, egui::TextureOptions::LINEAR);
+    }
+
     /// Raw RGBA8 pixel bytes, used by the "Copy Image" clipboard action.
     pub fn rgba_bytes(&self) -> Vec<u8> {
         self.rgba.clone()
@@ -93,9 +121,71 @@ impl ViewerImage {
     }
 }
 
+/// Decode raw bytes of a JPEG XL (.jxl) image into a `DynamicImage`.
+pub fn decode_jxl(bytes: &[u8]) -> Result<DynamicImage, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = jxl_oxide::integration::JxlDecoder::new(cursor).map_err(|e| e.to_string())?;
+    DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())
+}
+
+/// Decode raw bytes of an SVG or SVGZ vector graphic into a `DynamicImage`.
+/// When `max_side` is provided, scales the render target to that dimension for efficient thumbnailing.
+pub fn decode_svg(bytes: &[u8], max_side: Option<u32>) -> Result<DynamicImage, String> {
+    let decompressed: Vec<u8>;
+    let svg_bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read;
+        let mut gz = flate2::read::GzDecoder::new(bytes);
+        let mut buf = Vec::new();
+        gz.read_to_end(&mut buf)
+            .map_err(|e| format!("Failed to decompress svgz: {e}"))?;
+        decompressed = buf;
+        &decompressed[..]
+    } else {
+        bytes
+    };
+
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(svg_bytes, &opt)
+        .map_err(|e| format!("SVG parse error: {e}"))?;
+    let orig_size = tree.size();
+    let orig_w = orig_size.width().max(1.0);
+    let orig_h = orig_size.height().max(1.0);
+
+    let (scale, target_w, target_h) = if let Some(max) = max_side {
+        let s = (max as f32 / orig_w.max(orig_h)).min(1.0);
+        let tw = ((orig_w * s).round() as u32).max(1);
+        let th = ((orig_h * s).round() as u32).max(1);
+        (s, tw, th)
+    } else {
+        let tw = (orig_w.round() as u32).clamp(1, 16384);
+        let th = (orig_h.round() as u32).clamp(1, 16384);
+        let s_x = tw as f32 / orig_w;
+        let s_y = th as f32 / orig_h;
+        (s_x.min(s_y), tw, th)
+    };
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(target_w, target_h)
+        .ok_or_else(|| "Failed to allocate SVG render buffer".to_string())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let rgba_bytes = pixmap.take();
+    let img_buffer = image::RgbaImage::from_raw(target_w, target_h, rgba_bytes)
+        .ok_or_else(|| "Failed to construct RGBA image from SVG buffer".to_string())?;
+    Ok(DynamicImage::ImageRgba8(img_buffer))
+}
+
 /// Decode raw bytes into an EXIF-oriented image.
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let img_res = image::load_from_memory(bytes)
+        .or_else(|_| image::load_from_memory_with_format(bytes, image::ImageFormat::Avif))
+        .or_else(|_| image::load_from_memory_with_format(bytes, image::ImageFormat::Tga))
+        .or_else(|_| decode_jxl(bytes))
+        .or_else(|_| decode_svg(bytes, None));
+
+    let img = img_res.map_err(|e| e.to_string())?;
     let orientation = read_exif_orientation(bytes);
     Ok(apply_orientation(img, orientation))
 }
@@ -160,8 +250,14 @@ pub(crate) fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Result<DynamicIma
     if let Some(thumb) = embedded_thumbnail(bytes, max_side) {
         return Ok(thumb);
     }
+    // Fast path for SVG: render directly at target thumbnail resolution
+    if bytes.starts_with(b"<") || bytes.starts_with(b"<?xml") || bytes.starts_with(&[0x1f, 0x8b]) {
+        if let Ok(svg_thumb) = decode_svg(bytes, Some(max_side)) {
+            return Ok(svg_thumb);
+        }
+    }
     let orientation = read_exif_orientation(bytes);
-    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let img = decode(bytes)?;
     Ok(apply_orientation(img.thumbnail(max_side, max_side), orientation))
 }
 
@@ -358,5 +454,37 @@ mod tests {
         assert_eq!(gif.delays[0], std::time::Duration::from_millis(100));
         assert_eq!(gif.delays[1], std::time::Duration::from_millis(200));
         assert_eq!((gif.frames[0].width(), gif.frames[0].height()), (2, 2));
+    }
+
+    #[test]
+    fn decodes_svg_and_svgz() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80">
+            <rect width="100" height="80" fill="red"/>
+        </svg>"#;
+        let decoded = decode(svg.as_bytes()).expect("decode svg should succeed");
+        assert_eq!((decoded.width(), decoded.height()), (100, 80));
+
+        // SVGZ (gzipped svg)
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(svg.as_bytes()).unwrap();
+        let svgz_bytes = encoder.finish().unwrap();
+        let decoded_gz = decode(&svgz_bytes).expect("decode svgz should succeed");
+        assert_eq!((decoded_gz.width(), decoded_gz.height()), (100, 80));
+    }
+
+    #[test]
+    fn decodes_tga() {
+        let mut tga_bytes = Vec::new();
+        tiny_rgba()
+            .write_to(&mut std::io::Cursor::new(&mut tga_bytes), image::ImageFormat::Tga)
+            .expect("tga encode");
+        let decoded = decode(&tga_bytes).expect("decode tga should succeed");
+        assert_eq!((decoded.width(), decoded.height()), (2, 3));
+    }
+
+    #[test]
+    fn decode_jxl_handles_invalid_bytes_gracefully() {
+        assert!(decode_jxl(b"\0\0\0\x0cJXL \x0d\x0a\x87\x0a").is_err());
     }
 }

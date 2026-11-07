@@ -239,10 +239,47 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("set file list: {e}"))
 }
 
+/// Returns the primary monitor's working area `[x, y, width, height]`,
+/// excluding the Windows taskbar and docked appbars.
+pub fn get_work_area() -> Option<[f32; 4]> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut _ as *mut core::ffi::c_void,
+            0,
+        )
+    };
+    if ok != 0 {
+        let w = (rect.right - rect.left).max(0) as f32;
+        let h = (rect.bottom - rect.top).max(0) as f32;
+        Some([rect.left as f32, rect.top as f32, w, h])
+    } else {
+        None
+    }
+}
+
 mod windows;
 
 pub use windows::{
     add_folder_context_menu, check_registration_status, clean_all_registry_entries,
-    is_folder_context_menu_registered, remove_folder_context_menu, update_registration,
-    RegistryStatus,
+    is_folder_context_menu_registered, remove_folder_context_menu, start_drag_files,
+    update_registration, RegistryStatus,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_area_returns_valid_dimensions() {
+        if let Some([_x, _y, w, h]) = get_work_area() {
+            assert!(w > 0.0);
+            assert!(h > 0.0);
+        }
+    }
+}

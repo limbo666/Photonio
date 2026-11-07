@@ -1,7 +1,7 @@
 # Project Specification: Photonio (Rust)
 **Target:** Lightweight, high-performance, distraction-free desktop image viewer with glassmorphic aesthetics.
 **Target OS:** Windows 10 / 11 (x64)
-**Current Version:** v0.9.15
+**Current Version:** v0.9.17
 
 ## 1. Guiding Principles
 - **Minimalist & Distraction-Free:** No heavy ribbon bars or multi-tiered legacy menus. Pure canvas with floating frosted glass HUD, toolbar pill, and contextual overlays.
@@ -13,7 +13,7 @@
 ## 2. Technology Stack
 - **Language:** Rust (2021 edition)
 - **GUI Engine:** `eframe` / `egui` (0.28+) with Font Awesome 7 Solid iconography
-- **Image Pipeline:** `image` crate (PNG, JPEG/JFIF, TIFF, WebP, GIF, BMP, ICO), `kamadak-exif` (EXIF camera metadata inspection)
+- **Image Pipeline:** `image` crate (PNG, JPEG/JFIF, TIFF, WebP, GIF, BMP, ICO, TGA, AVIF), `resvg` / `usvg` (SVG, SVGZ), `jxl-oxide` (JPEG XL / JXL), `kamadak-exif` (EXIF camera metadata inspection)
 - **Platform APIs:**
   - `windows-sys` (Direct Win32 registry management, shell execution, wallpaper setting)
   - `rfd` (Native Windows fallback dialogs)
@@ -49,7 +49,16 @@
 ### 5. Folder Navigation History Stack
 - Traversal history stack with Back (`Alt + ←`) and Forward (`Alt + →`) navigation across directories in both viewer and grid modes.
 
-### 6. Safe In-Place File Renaming
+### 6. Selectable Folder Sorting & Navigation Order
+- Three selectable sort criteria: `Name` (natural case-insensitive alphanumeric), `Date Modified` (file system modification time), and `File Size` (file length in bytes).
+- Dual direction support: `Ascending` (A-Z / Oldest / Smallest) and `Descending` (Z-A / Newest / Largest).
+- Default behavior: `Name` + `Ascending` (100% backward compatible with prior versions).
+- High-performance Schwartzian transform caching metadata attributes during scan, guaranteeing $O(N)$ system calls instead of $O(N \log N)$.
+- Seamless in-place reconciliation: switches sort order without reloading the view, remapping decoded GPU texture and thumbnail caches and maintaining active image focus.
+- Accessible via the MultiView grid header dropdown, right-click canvas context menu, and Settings (`Ctrl + ,`).
+- Persisted automatically to `%APPDATA%\Photonio\config.json`.
+
+### 7. Safe In-Place File Renaming
 - Inline modal (`F2` or context menu) with live Windows file-naming validation.
 - Guards against illegal characters (`< > : " / \ | ? *`), DOS reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9), and file collisions.
 - NTFS case-only rename safety through disambiguation temporary paths.
@@ -60,7 +69,18 @@
 - 5 high-quality interpolation filters: Lanczos3, Gaussian, Catmull-Rom, Triangle, and Nearest.
 - Real-time target dimension feedback, file size estimation, and overwrite confirmation guards.
 
-### 8. Animated Playback Engine
+### 8. Ultimate Interactive Crop Tool
+- Visual on-canvas crop overlay (`C` or right-click menu or quick toolbar icon) with darkened outer mask.
+- 8 tactile drag handles (4 corner brackets + 4 edge grip bars) with dynamic cursor changes and interior box panning.
+- Aspect ratio constraint presets: `Free`, `Original`, `1:1 (Square)`, `16:9`, `4:3`, `3:2`.
+- Instant Portrait/Landscape orientation swap (`⇋`) for all ratio presets.
+- Toggleable composition guide overlays: Rule of Thirds (3×3) and Center Crosshair Grid.
+- Real-time pixel-exact numeric inputs (`Width`, `Height`, `X`, `Y`) with live percentage-of-original feedback.
+- Keyboard nudging: Arrow keys (`←`, `→`, `↑`, `↓`) nudge crop position by 1px (or 10px with `Shift`).
+- Multi-action workflow: In-memory live apply (`Enter`), lossless overwrite with confirmation (`Ctrl + S`), save copy (`Ctrl + Shift + S`), and direct clipboard image export (`Ctrl + C`).
+- Draggable floating toolbar with tactile grip handle (`⋮⋮`), boundary screen clamping, and double-click reset to default top-center.
+
+### 9. Animated Playback Engine
 - Multi-frame GIF and Animated WebP decoding with preserved per-frame delays.
 - Play/pause toggle (`Space`) and frame-by-frame stepping (`[` and `]`).
 
@@ -71,7 +91,7 @@
 
 ### 10. Floating HUD & Quick-Action Pill
 - Auto-hiding or pinned HUD bar with image index, file name, resolution, zoom percentage, and format badge.
-- Floating quick-action icon pill with customizable tool buttons (Open File, Open Folder, Save As, Print, Share, Filmstrip).
+- Floating quick-action icon pill with customizable tool buttons (Open File, Open Folder, Save As, Print, Share, Filmstrip), horizontal/vertical orientations, tactile drag grip handle (`⋮⋮`), screen boundary clamping, double-click reset to top-right, and session persistence.
 - 4-way dockable thumbnail filmstrip (Bottom / Top / Left / Right) with toggle hotkey (`T`).
 
 ### 11. Windows Shell & Registry Integration
@@ -82,19 +102,32 @@
 ### 12. Session Persistence
 - Window geometry, last-viewed image, containing folder, pinned quick-access folders, and preferences persisted to `%APPDATA%\Photonio\config.json`.
 
+### 13. Native Windows OLE Drag-and-Drop Out
+- Initiate native drag-and-drop (`DoDragDrop` with `CF_HDROP` and `CF_UNICODETEXT`) directly out of Photonio into external Windows applications (Desktop, Windows File Explorer, Photoshop, MS Paint, Chrome, Discord, Slack, etc.).
+- **Viewer Mode (Single Image):**
+  - Left-drag when zoomed in continues to pan the viewport smoothly (existing panning 100% preserved).
+  - Left-drag when NOT zoomed (fit-to-window or unscaled within bounds) with a $\ge 6\text{ px}$ deadzone initiates native OLE drag-out.
+  - Clicks under threshold preserve normal interaction (double-click zoom toggle, HUD toggle, context menu).
+- **MultiView Grid & Filmstrip Modes:**
+  - Dragging any image thumbnail card or folder tile with $\ge 6\text{ px}$ threshold initiates native OLE drag-out.
+  - Normal clicks, double-clicks, and background scrolling remain 100% intact.
+- **Pure Win32 Implementation:**
+  - Implements lightweight in-process COM `IDataObject`, `IDropSource`, and `IEnumFORMATETC` vtables via `windows-sys` with zero external bloat.
+
 ## 4. Architecture Contract
 
 | Module | Responsibility |
 | --- | --- |
 | `src/main.rs` | Application entry point, CLI argument ingestion, window initialization and lifecycle |
-| `src/app.rs` | Main egui UI state machine, keyboard/mouse dispatch, HUD, pill, filmstrip, grid mode, modals |
+| `src/app/mod.rs` | Main egui UI state machine, keyboard/mouse dispatch, lifecycle orchestrator |
+| `src/app/` | UI submodules: `types`, `widgets`, `breadcrumbs`, `cache`, `dialogs/`, `hud`, `filmstrip`, `grid`, `context_menu` |
 | `src/viewer/mod.rs` | Texture cache, animation playback loop, zoom/pan coordinate transformation |
 | `src/viewer/folder_browser.rs` | In-app folder selector dialog, cover thumbnail generation, quick access, breadcrumbs |
 | `src/viewer/metadata.rs` | File information, image properties, and EXIF camera metadata extraction |
-| `src/viewer/resizer.rs` | Image resampling, aspect ratio math, and interpolation algorithms |
+| `src/viewer/resize.rs` | Image resampling, aspect ratio math, and interpolation algorithms |
 | `src/filesystem/mod.rs` | Directory scanner, natural sort comparator (natord), directory watcher, safe rename |
 | `src/platform/mod.rs` | Windows shell integration (wallpaper setting, Explorer launch, print, clipboard) |
-| `src/platform/windows.rs` | Win32 registry integration: HKCU default-app file associations & folder context menu |
+| `src/platform/windows.rs` | Win32 registry integration (HKCU file associations & folder context menu) and native OLE Drag-and-Drop (CF_HDROP & CF_UNICODETEXT) |
 | `src/theme.rs` | Visual design system: theme tokens, frosted glassmorphism, button styles, color palettes |
 | `src/loader.rs` | Background decode workers: full-res priority ring preloading & batch thumbnail generator |
 | `src/config.rs` | JSON configuration serialization and disk persistence |
