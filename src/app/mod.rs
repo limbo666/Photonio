@@ -142,6 +142,8 @@ pub struct PhotonioApp {
     pub(crate) last_folder_check: std::time::Instant,
     /// Previous frame's window focus state (detects focus regained).
     pub(crate) was_window_focused: bool,
+    /// Previous frame's window minimized state (flushes config when minimizing).
+    pub(crate) was_minimized: bool,
     /// The active tab in the two-pane Settings modal (persisted across frames).
     pub(crate) settings_tab: SettingsTab,
     /// Cached at startup: `euro.png` / `euro.jpg` sits next to the executable.
@@ -196,6 +198,23 @@ impl PhotonioApp {
             config.canvas_background != config::CanvasBackground::Light,
         );
         setup_fonts(&cc.egui_ctx);
+
+        #[cfg(target_os = "windows")]
+        {
+            let mut target_hwnd = None;
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = cc.window_handle() {
+                if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    target_hwnd = Some(win32.hwnd.get() as windows_sys::Win32::Foundation::HWND);
+                }
+            }
+            if target_hwnd.is_none() {
+                target_hwnd = crate::platform::get_current_thread_window();
+            }
+            if let Some(hwnd) = target_hwnd {
+                crate::platform::attach_minimized_close_handler(hwnd);
+            }
+        }
 
         // Disable egui's default keyboard-triggered whole-page zoom (Ctrl+±/0)
         // so hotkeys target image containers and content rather than scaling the entire UI.
@@ -277,6 +296,7 @@ impl PhotonioApp {
             last_folder_mtime: None,
             last_folder_check: std::time::Instant::now(),
             was_window_focused: true,
+            was_minimized: false,
             settings_tab: SettingsTab::Appearance,
             is_supporter,
             logo,
@@ -2400,6 +2420,27 @@ impl PhotonioApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
     }
 
+    /// Resets the window size and position back to primary display defaults (centered 960x640).
+    pub(crate) fn reset_window_geometry(&mut self, ctx: &egui::Context) {
+        let default_size = [960.0_f32, 640.0_f32];
+        let [work_x, work_y, work_w, work_h] =
+            crate::platform::get_work_area().unwrap_or([0.0, 0.0, 1920.0, 1080.0]);
+        let cx = (work_x + (work_w - default_size[0]) / 2.0).max(work_x);
+        let cy = (work_y + (work_h - default_size[1]) / 2.0).max(work_y);
+
+        self.window_pos = Some([cx, cy]);
+        self.window_size = Some(default_size);
+        self.window_rect = None;
+        self.save_config();
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            default_size[0],
+            default_size[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(cx, cy)));
+        self.show_success("Window reset to primary display default (960×640)");
+    }
+
     // ------------------------------------------------------------------
     // Modals (mutually exclusive)
     // ------------------------------------------------------------------
@@ -3170,21 +3211,37 @@ impl eframe::App for PhotonioApp {
             self.last_interaction_instant = std::time::Instant::now();
         }
 
-        let (outer_rect, inner_rect, close_requested) = ctx.input(|i| {
+        let (outer_rect, inner_rect, close_requested, is_minimized) = ctx.input(|i| {
             (
                 i.viewport().outer_rect,
                 i.viewport().inner_rect,
                 i.viewport().close_requested(),
+                i.viewport().minimized.unwrap_or(false),
             )
         });
+        if is_minimized && !self.was_minimized {
+            self.save_config();
+        }
+        self.was_minimized = is_minimized;
         if let Some(outer) = outer_rect {
-            self.window_pos = Some([outer.min.x, outer.min.y]);
-            self.window_rect = Some(outer);
+            // Guard against Windows iconic / minimized sentinel coordinates (-32000, -32000)
+            if outer.min.x > -10000.0
+                && outer.min.y > -10000.0
+                && outer.width() > 100.0
+                && outer.height() > 100.0
+            {
+                self.window_pos = Some([outer.min.x, outer.min.y]);
+                self.window_rect = Some(outer);
+            }
         }
         if let Some(inner) = inner_rect {
-            self.window_size = Some([inner.width(), inner.height()]);
+            if inner.width() > 100.0 && inner.height() > 100.0 {
+                self.window_size = Some([inner.width(), inner.height()]);
+            }
         } else if let Some(outer) = outer_rect {
-            self.window_size = Some([outer.width(), outer.height()]);
+            if outer.width() > 100.0 && outer.height() > 100.0 {
+                self.window_size = Some([outer.width(), outer.height()]);
+            }
         }
 
         // Mode-aware keyboard navigation.
@@ -3609,6 +3666,10 @@ impl eframe::App for PhotonioApp {
         // Folder browser modal — rendered last so it always sits on top of
         // every other element (HUD, pills, filmstrip, other modals).
         self.render_folder_browser(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_config();
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "photonio"
-version = "0.9.17"
+version = "0.9.18"
 edition = "2021"
 
 [dependencies]
@@ -21,11 +21,12 @@ kamadak-exif = "0.6"
 # Natural (alphanumeric) sort so "img2" < "img10".
 # Add via: cargo add natord@1.0
 natord = "1.0"
+raw-window-handle = "0.6"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 trash = "5.2.9"
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_DataExchange"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_DataExchange", "Win32_System_Threading"] }
 jxl-oxide = { version = "0.12", features = ["image"] }
 resvg = "0.44"
 flate2 = "1.1"

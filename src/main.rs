@@ -26,45 +26,11 @@ fn main() -> eframe::Result {
     let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
 
     let default_size = [960.0_f32, 640.0_f32];
-
-    let (final_size, final_pos) = if let Some([work_x, work_y, work_w, work_h]) = platform::get_work_area() {
-        // Enforce safe limits so window never exceeds screen work area minus margins
-        let max_w = (work_w - 40.0).max(320.0);
-        let max_h = (work_h - 40.0).max(240.0);
-
-        let size = if let Some(s) = config.window_size {
-            [s[0].clamp(320.0, max_w), s[1].clamp(240.0, max_h)]
-        } else {
-            [default_size[0].min(max_w), default_size[1].min(max_h)]
-        };
-
-        let pos = if let Some(p) = config.window_pos {
-            // Keep window within visible screen boundaries
-            let max_x = (work_x + work_w - 100.0).max(work_x);
-            let max_y = (work_y + work_h - 60.0).max(work_y);
-            let mut x = p[0].clamp(work_x, max_x);
-            let mut y = p[1].clamp(work_y, max_y);
-
-            // Shift if bottom or right hangs off screen
-            if x + size[0] > work_x + work_w {
-                x = (work_x + work_w - size[0]).max(work_x);
-            }
-            if y + size[1] > work_y + work_h {
-                y = (work_y + work_h - size[1]).max(work_y);
-            }
-            [x, y]
-        } else {
-            // Default: center window in visible screen work area
-            let cx = (work_x + (work_w - size[0]) / 2.0).max(work_x);
-            let cy = (work_y + (work_h - size[1]) / 2.0).max(work_y);
-            [cx, cy]
-        };
-
-        (size, Some(pos))
-    } else {
-        let size = config.window_size.unwrap_or(default_size);
-        (size, config.window_pos)
-    };
+    let (final_size, final_pos) = platform::resolve_window_geometry(
+        config.window_pos,
+        config.window_size,
+        default_size,
+    );
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("Photonio v{}", env!("CARGO_PKG_VERSION")))

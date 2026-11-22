@@ -563,6 +563,20 @@ pub(crate) fn settings_behavior(app: &mut PhotonioApp, ui: &mut egui::Ui, colors
         changed |= ui
             .checkbox(&mut app.config.start_fullscreen, "Start in Fullscreen")
             .changed();
+
+        ui.add_space(4.0);
+        let reset_pos_btn = colors.button_secondary(
+            ui,
+            format!("{} Reset Window Position & Size", icons::ICON_ARROWS_ROTATE),
+            egui::vec2(0.0, 26.0),
+            true,
+        );
+        if reset_pos_btn
+            .on_hover_text("Center window on primary display and restore default 960×640 dimensions")
+            .clicked()
+        {
+            app.reset_window_geometry(ui.ctx());
+        }
     });
     ui.add_space(6.0);
 

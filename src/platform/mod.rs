@@ -263,6 +263,248 @@ pub fn get_work_area() -> Option<[f32; 4]> {
     }
 }
 
+/// Clamps a window size and position within a given monitor work area `[x, y, width, height]`.
+///
+/// Ensures minimum size (320x240), keeps the top-left / titlebar within visible bounds,
+/// and shifts the window left/up if it overflows the right or bottom edge of the monitor.
+pub fn clamp_to_work_area(
+    pos: [f32; 2],
+    size: [f32; 2],
+    work_area: [f32; 4],
+) -> ([f32; 2], [f32; 2]) {
+    let [work_x, work_y, work_w, work_h] = work_area;
+    let max_w = (work_w - 40.0).max(320.0);
+    let max_h = (work_h - 40.0).max(240.0);
+
+    let clamped_size = [
+        size[0].clamp(320.0, max_w),
+        size[1].clamp(240.0, max_h),
+    ];
+
+    // Keep window titlebar / frame accessible
+    let max_x = (work_x + work_w - 100.0).max(work_x);
+    let max_y = (work_y + work_h - 60.0).max(work_y);
+    let mut x = pos[0].clamp(work_x, max_x);
+    let mut y = pos[1].clamp(work_y, max_y);
+
+    // Shift if bottom or right hangs off screen
+    if x + clamped_size[0] > work_x + work_w {
+        x = (work_x + work_w - clamped_size[0]).max(work_x);
+    }
+    if y + clamped_size[1] > work_y + work_h {
+        y = (work_y + work_h - clamped_size[1]).max(work_y);
+    }
+
+    (clamped_size, [x, y])
+}
+
+/// Query the work area `[x, y, width, height]` of the monitor that intersects
+/// the specified window rectangle. If the rectangle does not intersect any active
+/// monitor (e.g. monitor was disconnected or coordinates are out of bounds), returns `None`.
+#[cfg(target_os = "windows")]
+pub fn find_monitor_work_area(x: f32, y: f32, w: f32, h: f32) -> Option<[f32; 4]> {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL,
+    };
+
+    let rect = RECT {
+        left: x.round() as i32,
+        top: y.round() as i32,
+        right: (x + w).round() as i32,
+        bottom: (y + h).round() as i32,
+    };
+
+    let mut hmon = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) };
+    if hmon.is_null() {
+        let pt = POINT {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        };
+        hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) };
+    }
+
+    if hmon.is_null() {
+        return None;
+    }
+
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+
+    let ok = unsafe { GetMonitorInfoW(hmon, &mut info) };
+    if ok != 0 {
+        let r = info.rcWork;
+        let mw = (r.right - r.left).max(0) as f32;
+        let mh = (r.bottom - r.top).max(0) as f32;
+        if mw > 0.0 && mh > 0.0 {
+            Some([r.left as f32, r.top as f32, mw, mh])
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn find_monitor_work_area(_x: f32, _y: f32, _w: f32, _h: f32) -> Option<[f32; 4]> {
+    None
+}
+
+/// Resolves and validates window size and position across multi-monitor topologies.
+///
+/// If a saved position is provided and intersects an active monitor (including secondary
+/// monitors with negative or displaced coordinates), the window is safely constrained
+/// within that monitor's usable work area.
+///
+/// If the saved position is out of bounds or the monitor was disconnected/removed,
+/// the position resets to default parameters: centered on the Primary Monitor with safe dimensions.
+pub fn resolve_window_geometry(
+    saved_pos: Option<[f32; 2]>,
+    saved_size: Option<[f32; 2]>,
+    default_size: [f32; 2],
+) -> ([f32; 2], Option<[f32; 2]>) {
+    let primary_work = get_work_area().unwrap_or([0.0, 0.0, 1920.0, 1080.0]);
+
+    if let Some(pos) = saved_pos {
+        let req_size = saved_size.unwrap_or(default_size);
+        if let Some(mon_work) = find_monitor_work_area(pos[0], pos[1], req_size[0], req_size[1]) {
+            let (size, clamped_pos) = clamp_to_work_area(pos, req_size, mon_work);
+            return (size, Some(clamped_pos));
+        }
+        // Monitor is disconnected or out of bounds -> fall through to reset on primary monitor!
+    }
+
+    // Default / Reset: center on primary monitor
+    let [work_x, work_y, work_w, work_h] = primary_work;
+    let max_w = (work_w - 40.0).max(320.0);
+    let max_h = (work_h - 40.0).max(240.0);
+
+    let size = if let Some(s) = saved_size {
+        [s[0].clamp(320.0, max_w), s[1].clamp(240.0, max_h)]
+    } else {
+        [default_size[0].min(max_w), default_size[1].min(max_h)]
+    };
+
+    let cx = (work_x + (work_w - size[0]) / 2.0).max(work_x);
+    let cy = (work_y + (work_h - size[1]) / 2.0).max(work_y);
+
+    (size, Some([cx, cy]))
+}
+
+/// Attach a Win32 window subclass to handle taskbar "Close window" when minimized.
+///
+/// On Windows, the OS does not dispatch `WM_PAINT` to iconic (minimized) windows.
+/// Because `winit`/`eframe` relies on `WM_PAINT` to dispatch `RedrawRequested` and
+/// process `CloseRequested`, closing a minimized window from the taskbar context menu
+/// stalls indefinitely in `GetMessageW` until the window is restored/maximized.
+/// This subclass intercepts `WM_CLOSE` and `WM_SYSCOMMAND (SC_CLOSE)`. If the window
+/// is currently iconic, it immediately terminates the process cleanly via `std::process::exit(0)`.
+#[cfg(target_os = "windows")]
+pub fn attach_minimized_close_handler(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, WM_CLOSE, WM_NCDESTROY, WM_SYSCOMMAND,
+    };
+
+    type SubclassProc = unsafe extern "system" fn(
+        HWND,
+        u32,
+        WPARAM,
+        LPARAM,
+        usize,
+        usize,
+    ) -> LRESULT;
+
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(
+            hWnd: HWND,
+            pfnSubclass: SubclassProc,
+            uIdSubclass: usize,
+            dwRefData: usize,
+        ) -> i32;
+
+        fn RemoveWindowSubclass(
+            hWnd: HWND,
+            pfnSubclass: SubclassProc,
+            uIdSubclass: usize,
+        ) -> i32;
+
+        fn DefSubclassProc(
+            hWnd: HWND,
+            uMsg: u32,
+            wParam: WPARAM,
+            lParam: LPARAM,
+        ) -> LRESULT;
+    }
+
+    const SUBCLASS_ID: usize = 0x5048_4F54; // 'PHOT'
+    const SC_CLOSE_MASK: usize = 0xFFF0;
+    const SC_CLOSE_VAL: usize = 0xF060;
+
+    unsafe extern "system" fn subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        uid: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        let is_close_request = msg == WM_CLOSE
+            || (msg == WM_SYSCOMMAND && (wparam & SC_CLOSE_MASK) == SC_CLOSE_VAL);
+
+        if is_close_request && IsIconic(hwnd) != 0 {
+            std::process::exit(0);
+        } else if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, subclass_proc, uid);
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    unsafe {
+        SetWindowSubclass(hwnd, subclass_proc, SUBCLASS_ID, 0);
+    }
+}
+
+/// Fallback helper to discover the main window `HWND` for the current thread.
+#[cfg(target_os = "windows")]
+pub fn get_current_thread_window() -> Option<windows_sys::Win32::Foundation::HWND> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW};
+
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let mut found_hwnd: HWND = std::ptr::null_mut();
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let mut class_name = [0u16; 64];
+        let len = GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32);
+        if len > 0 {
+            let name = String::from_utf16_lossy(&class_name[..len as usize]);
+            if name == "Window Class" {
+                *(lparam as *mut HWND) = hwnd;
+                return 0; // stop enumeration
+            }
+        }
+        1 // continue
+    }
+
+    unsafe {
+        EnumThreadWindows(
+            thread_id,
+            Some(enum_proc),
+            &mut found_hwnd as *mut HWND as LPARAM,
+        );
+    }
+
+    if !found_hwnd.is_null() {
+        Some(found_hwnd)
+    } else {
+        None
+    }
+}
+
 mod windows;
 
 pub use windows::{
@@ -280,6 +522,72 @@ mod tests {
         if let Some([_x, _y, w, h]) = get_work_area() {
             assert!(w > 0.0);
             assert!(h > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_clamp_to_work_area_preserves_valid_multimonitor_coordinates() {
+        // Monitor 2 to the right: [1920, 0, 1920, 1080]
+        let work_area = [1920.0, 0.0, 1920.0, 1080.0];
+        let pos = [2100.0, 150.0];
+        let size = [960.0, 640.0];
+
+        let (clamped_size, clamped_pos) = clamp_to_work_area(pos, size, work_area);
+        assert_eq!(clamped_size, size);
+        assert_eq!(clamped_pos, pos);
+
+        // Monitor 2 to the left: [-1920, 0, 1920, 1080]
+        let work_area_left = [-1920.0, 0.0, 1920.0, 1080.0];
+        let pos_left = [-1500.0, 100.0];
+        let (clamped_size_left, clamped_pos_left) = clamp_to_work_area(pos_left, size, work_area_left);
+        assert_eq!(clamped_size_left, size);
+        assert_eq!(clamped_pos_left, pos_left);
+    }
+
+    #[test]
+    fn test_clamp_to_work_area_shifts_overflowing_window() {
+        let work_area = [0.0, 0.0, 1920.0, 1080.0];
+        // Window placed too far right: 1500 + 960 = 2460 > 1920
+        let pos = [1500.0, 100.0];
+        let size = [960.0, 640.0];
+
+        let (clamped_size, clamped_pos) = clamp_to_work_area(pos, size, work_area);
+        assert_eq!(clamped_size, size);
+        assert_eq!(clamped_pos[0], 1920.0 - 960.0);
+        assert_eq!(clamped_pos[1], 100.0);
+    }
+
+    #[test]
+    fn test_find_monitor_work_area_distinguishes_valid_and_out_of_bounds() {
+        #[cfg(target_os = "windows")]
+        {
+            // Primary monitor (0, 0, 800, 600) should be found
+            let primary = find_monitor_work_area(0.0, 0.0, 800.0, 600.0);
+            assert!(primary.is_some());
+
+            // Wild out-of-bounds coordinates should return None
+            let out_of_bounds = find_monitor_work_area(999_999.0, 999_999.0, 800.0, 600.0);
+            assert!(out_of_bounds.is_none());
+        }
+    }
+
+    #[test]
+    fn test_resolve_window_geometry_resets_when_out_of_bounds() {
+        let default_size = [960.0, 640.0];
+        let (size, pos) = resolve_window_geometry(
+            Some([999_999.0, 999_999.0]),
+            Some([1000.0, 700.0]),
+            default_size,
+        );
+
+        assert!(size[0] >= 320.0);
+        assert!(size[1] >= 240.0);
+        assert!(pos.is_some());
+        let [x, y] = pos.unwrap();
+        // Since it reset to primary monitor, x and y must be within primary monitor work area
+        if let Some([wx, wy, ww, wh]) = get_work_area() {
+            assert!(x >= wx && x < wx + ww);
+            assert!(y >= wy && y < wy + wh);
         }
     }
 }
